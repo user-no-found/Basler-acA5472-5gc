@@ -1,0 +1,526 @@
+#-*- coding: utf-8 -*-
+"""
+控制面板模块
+
+功能:
+- 拍照控制（拍照按钮、显示最后拍照文件名）
+- 录像控制（开始/停止、时长、分辨率、帧率、状态显示）
+- 预览控制（开启/停止、分辨率、帧率、状态显示）
+- 参数设置（曝光模式/值、增益、白平衡模式）
+- 查询功能（状态、参数、分辨率列表）
+"""
+
+import tkinter as tk
+from tkinter import ttk
+from typing import Callable, Optional
+from loguru import logger
+
+from protocol_builder import (
+    build_capture, build_record_start, build_record_stop,
+    build_preview_start, build_preview_stop,
+    build_set_exposure, build_set_gain, build_set_white_balance,
+    build_query_status, build_query_params, build_query_resolutions
+)
+from error_codes import get_error_message
+
+
+#分辨率选项
+RESOLUTION_OPTIONS = [
+    ("1920x1080", 0, 1920, 1080),
+    ("1280x720", 1, 1280, 720),
+    ("640x480", 2, 640, 480),
+]
+
+#帧率选项
+RECORD_FPS_OPTIONS = list(range(1, 31))  #1-30
+PREVIEW_FPS_OPTIONS = list(range(5, 31))  #5-30
+
+
+class ControlPanel(ttk.Frame):
+    """控制面板组件"""
+
+    def __init__(self, parent, send_callback: Callable[[bytes], bool]):
+        """
+        初始化控制面板
+
+        Args:
+            parent: 父容器
+            send_callback: 发送数据回调函数
+        """
+        super().__init__(parent, padding="5")
+        self._send = send_callback
+
+        #状态变量
+        self._is_recording = False
+        self._is_previewing = False
+        self._last_capture_file = ""
+
+        #创建界面
+        self._create_ui()
+
+    def _create_ui(self):
+        """创建用户界面"""
+        #拍照控制
+        self._create_capture_section()
+
+        #录像控制
+        self._create_record_section()
+
+        #预览控制
+        self._create_preview_section()
+
+        #参数设置
+        self._create_params_section()
+
+        #查询功能
+        self._create_query_section()
+
+    def _create_capture_section(self):
+        """创建拍照控制区域"""
+        frame = ttk.LabelFrame(self, text="拍照控制", padding="5")
+        frame.pack(fill=tk.X, pady=(0, 5))
+
+        #拍照按钮
+        self.capture_btn = ttk.Button(frame, text="拍照", command=self._on_capture)
+        self.capture_btn.pack(fill=tk.X, pady=2)
+
+        #最后拍照文件名
+        file_frame = ttk.Frame(frame)
+        file_frame.pack(fill=tk.X, pady=2)
+
+        ttk.Label(file_frame, text="最后拍照:").pack(side=tk.LEFT)
+        self.capture_file_label = ttk.Label(file_frame, text="--", foreground="gray")
+        self.capture_file_label.pack(side=tk.LEFT, padx=(5, 0))
+
+    def _create_record_section(self):
+        """创建录像控制区域"""
+        frame = ttk.LabelFrame(self, text="录像控制", padding="5")
+        frame.pack(fill=tk.X, pady=(0, 5))
+
+        #录像时长
+        duration_frame = ttk.Frame(frame)
+        duration_frame.pack(fill=tk.X, pady=2)
+
+        ttk.Label(duration_frame, text="时长(秒):").pack(side=tk.LEFT)
+        self.record_duration_var = tk.StringVar(value="0")
+        self.record_duration_entry = ttk.Entry(duration_frame, textvariable=self.record_duration_var, width=8)
+        self.record_duration_entry.pack(side=tk.LEFT, padx=(5, 0))
+        ttk.Label(duration_frame, text="(0=手动停止)", foreground="gray").pack(side=tk.LEFT, padx=(5, 0))
+
+        #分辨率选择
+        res_frame = ttk.Frame(frame)
+        res_frame.pack(fill=tk.X, pady=2)
+
+        ttk.Label(res_frame, text="分辨率:").pack(side=tk.LEFT)
+        self.record_res_var = tk.StringVar(value=RESOLUTION_OPTIONS[0][0])
+        self.record_res_combo = ttk.Combobox(
+            res_frame,
+            textvariable=self.record_res_var,
+            values=[r[0] for r in RESOLUTION_OPTIONS],
+            state="readonly",
+            width=12
+        )
+        self.record_res_combo.pack(side=tk.LEFT, padx=(5, 0))
+
+        #帧率选择
+        fps_frame = ttk.Frame(frame)
+        fps_frame.pack(fill=tk.X, pady=2)
+
+        ttk.Label(fps_frame, text="帧率:").pack(side=tk.LEFT)
+        self.record_fps_var = tk.StringVar(value="5")
+        self.record_fps_combo = ttk.Combobox(
+            fps_frame,
+            textvariable=self.record_fps_var,
+            values=RECORD_FPS_OPTIONS,
+            state="readonly",
+            width=6
+        )
+        self.record_fps_combo.pack(side=tk.LEFT, padx=(5, 0))
+        ttk.Label(fps_frame, text="fps").pack(side=tk.LEFT, padx=(2, 0))
+
+        #按钮区域
+        btn_frame = ttk.Frame(frame)
+        btn_frame.pack(fill=tk.X, pady=2)
+
+        self.record_start_btn = ttk.Button(btn_frame, text="开始录像", command=self._on_record_start)
+        self.record_start_btn.pack(side=tk.LEFT, expand=True, fill=tk.X, padx=(0, 2))
+
+        self.record_stop_btn = ttk.Button(btn_frame, text="停止录像", command=self._on_record_stop, state=tk.DISABLED)
+        self.record_stop_btn.pack(side=tk.LEFT, expand=True, fill=tk.X, padx=(2, 0))
+
+        #录像状态
+        status_frame = ttk.Frame(frame)
+        status_frame.pack(fill=tk.X, pady=2)
+
+        ttk.Label(status_frame, text="状态:").pack(side=tk.LEFT)
+        self.record_status_label = ttk.Label(status_frame, text="未录像", foreground="gray")
+        self.record_status_label.pack(side=tk.LEFT, padx=(5, 0))
+
+    def _create_preview_section(self):
+        """创建预览控制区域"""
+        frame = ttk.LabelFrame(self, text="预览控制", padding="5")
+        frame.pack(fill=tk.X, pady=(0, 5))
+
+        #分辨率选择
+        res_frame = ttk.Frame(frame)
+        res_frame.pack(fill=tk.X, pady=2)
+
+        ttk.Label(res_frame, text="分辨率:").pack(side=tk.LEFT)
+        self.preview_res_var = tk.StringVar(value=RESOLUTION_OPTIONS[0][0])
+        self.preview_res_combo = ttk.Combobox(
+            res_frame,
+            textvariable=self.preview_res_var,
+            values=[r[0] for r in RESOLUTION_OPTIONS],
+            state="readonly",
+            width=12
+        )
+        self.preview_res_combo.pack(side=tk.LEFT, padx=(5, 0))
+
+        #帧率选择
+        fps_frame = ttk.Frame(frame)
+        fps_frame.pack(fill=tk.X, pady=2)
+
+        ttk.Label(fps_frame, text="帧率:").pack(side=tk.LEFT)
+        self.preview_fps_var = tk.StringVar(value="10")
+        self.preview_fps_combo = ttk.Combobox(
+            fps_frame,
+            textvariable=self.preview_fps_var,
+            values=PREVIEW_FPS_OPTIONS,
+            state="readonly",
+            width=6
+        )
+        self.preview_fps_combo.pack(side=tk.LEFT, padx=(5, 0))
+        ttk.Label(fps_frame, text="fps").pack(side=tk.LEFT, padx=(2, 0))
+
+        #按钮区域
+        btn_frame = ttk.Frame(frame)
+        btn_frame.pack(fill=tk.X, pady=2)
+
+        self.preview_start_btn = ttk.Button(btn_frame, text="开启预览", command=self._on_preview_start)
+        self.preview_start_btn.pack(side=tk.LEFT, expand=True, fill=tk.X, padx=(0, 2))
+
+        self.preview_stop_btn = ttk.Button(btn_frame, text="停止预览", command=self._on_preview_stop, state=tk.DISABLED)
+        self.preview_stop_btn.pack(side=tk.LEFT, expand=True, fill=tk.X, padx=(2, 0))
+
+        #预览状态
+        status_frame = ttk.Frame(frame)
+        status_frame.pack(fill=tk.X, pady=2)
+
+        ttk.Label(status_frame, text="状态:").pack(side=tk.LEFT)
+        self.preview_status_label = ttk.Label(status_frame, text="未预览", foreground="gray")
+        self.preview_status_label.pack(side=tk.LEFT, padx=(5, 0))
+
+    def _create_params_section(self):
+        """创建参数设置区域"""
+        frame = ttk.LabelFrame(self, text="参数设置", padding="5")
+        frame.pack(fill=tk.X, pady=(0, 5))
+
+        #曝光模式
+        exp_mode_frame = ttk.Frame(frame)
+        exp_mode_frame.pack(fill=tk.X, pady=2)
+
+        ttk.Label(exp_mode_frame, text="曝光模式:").pack(side=tk.LEFT)
+        self.exposure_mode_var = tk.StringVar(value="自动")
+        self.exposure_mode_combo = ttk.Combobox(
+            exp_mode_frame,
+            textvariable=self.exposure_mode_var,
+            values=["自动", "手动"],
+            state="readonly",
+            width=8
+        )
+        self.exposure_mode_combo.pack(side=tk.LEFT, padx=(5, 0))
+        self.exposure_mode_combo.bind("<<ComboboxSelected>>", self._on_exposure_mode_changed)
+
+        #曝光时间
+        exp_val_frame = ttk.Frame(frame)
+        exp_val_frame.pack(fill=tk.X, pady=2)
+
+        ttk.Label(exp_val_frame, text="曝光时间:").pack(side=tk.LEFT)
+        self.exposure_value_var = tk.StringVar(value="10000")
+        self.exposure_value_entry = ttk.Entry(exp_val_frame, textvariable=self.exposure_value_var, width=10, state=tk.DISABLED)
+        self.exposure_value_entry.pack(side=tk.LEFT, padx=(5, 0))
+        ttk.Label(exp_val_frame, text="us").pack(side=tk.LEFT, padx=(2, 0))
+
+        #增益
+        gain_frame = ttk.Frame(frame)
+        gain_frame.pack(fill=tk.X, pady=2)
+
+        ttk.Label(gain_frame, text="增益:").pack(side=tk.LEFT)
+        self.gain_var = tk.StringVar(value="100")
+        self.gain_entry = ttk.Entry(gain_frame, textvariable=self.gain_var, width=10)
+        self.gain_entry.pack(side=tk.LEFT, padx=(5, 0))
+        ttk.Label(gain_frame, text="(0-1000)").pack(side=tk.LEFT, padx=(2, 0))
+
+        #白平衡模式
+        wb_frame = ttk.Frame(frame)
+        wb_frame.pack(fill=tk.X, pady=2)
+
+        ttk.Label(wb_frame, text="白平衡:").pack(side=tk.LEFT)
+        self.wb_mode_var = tk.StringVar(value="自动")
+        self.wb_mode_combo = ttk.Combobox(
+            wb_frame,
+            textvariable=self.wb_mode_var,
+            values=["自动", "手动"],
+            state="readonly",
+            width=8
+        )
+        self.wb_mode_combo.pack(side=tk.LEFT, padx=(5, 0))
+
+        #应用按钮
+        self.apply_params_btn = ttk.Button(frame, text="应用参数", command=self._on_apply_params)
+        self.apply_params_btn.pack(fill=tk.X, pady=(5, 2))
+
+    def _create_query_section(self):
+        """创建查询功能区域"""
+        frame = ttk.LabelFrame(self, text="查询功能", padding="5")
+        frame.pack(fill=tk.X, pady=(0, 5))
+
+        #查询状态
+        self.query_status_btn = ttk.Button(frame, text="查询状态", command=self._on_query_status)
+        self.query_status_btn.pack(fill=tk.X, pady=2)
+
+        #查询参数
+        self.query_params_btn = ttk.Button(frame, text="查询参数", command=self._on_query_params)
+        self.query_params_btn.pack(fill=tk.X, pady=2)
+
+        #查询分辨率列表
+        self.query_res_btn = ttk.Button(frame, text="查询分辨率列表", command=self._on_query_resolutions)
+        self.query_res_btn.pack(fill=tk.X, pady=2)
+
+    def _get_resolution_index(self, res_str: str) -> int:
+        """获取分辨率索引"""
+        for name, index, w, h in RESOLUTION_OPTIONS:
+            if name == res_str:
+                return index
+        return 0
+
+    def _on_exposure_mode_changed(self, event=None):
+        """曝光模式变化"""
+        if self.exposure_mode_var.get() == "手动":
+            self.exposure_value_entry.config(state=tk.NORMAL)
+        else:
+            self.exposure_value_entry.config(state=tk.DISABLED)
+
+    def _on_capture(self):
+        """拍照按钮点击"""
+        logger.info("发送拍照命令")
+        self._send(build_capture())
+
+    def _on_record_start(self):
+        """开始录像按钮点击"""
+        try:
+            duration = int(self.record_duration_var.get())
+            if duration < 0:
+                duration = 0
+        except ValueError:
+            duration = 0
+
+        res_index = self._get_resolution_index(self.record_res_var.get())
+
+        try:
+            fps = int(self.record_fps_var.get())
+            fps = max(1, min(30, fps))
+        except ValueError:
+            fps = 5
+
+        logger.info(f"发送开始录像命令: duration={duration}, res_index={res_index}, fps={fps}")
+        self._send(build_record_start(duration=duration, resolution_index=res_index, fps=fps))
+
+    def _on_record_stop(self):
+        """停止录像按钮点击"""
+        logger.info("发送停止录像命令")
+        self._send(build_record_stop())
+
+    def _on_preview_start(self):
+        """开启预览按钮点击"""
+        res_index = self._get_resolution_index(self.preview_res_var.get())
+
+        try:
+            fps = int(self.preview_fps_var.get())
+            fps = max(5, min(30, fps))
+        except ValueError:
+            fps = 10
+
+        logger.info(f"发送开启预览命令: res_index={res_index}, fps={fps}")
+        self._send(build_preview_start(resolution_index=res_index, fps=fps))
+
+    def _on_preview_stop(self):
+        """停止预览按钮点击"""
+        logger.info("发送停止预览命令")
+        self._send(build_preview_stop())
+
+    def _on_apply_params(self):
+        """应用参数按钮点击"""
+        #曝光设置
+        exp_mode = 0 if self.exposure_mode_var.get() == "自动" else 1
+        try:
+            exp_value = int(self.exposure_value_var.get())
+            exp_value = max(0, exp_value)
+        except ValueError:
+            exp_value = 10000
+
+        logger.info(f"发送曝光设置: mode={exp_mode}, value={exp_value}")
+        self._send(build_set_exposure(mode=exp_mode, value=exp_value))
+
+        #增益设置
+        try:
+            gain = int(self.gain_var.get())
+            gain = max(0, min(1000, gain))
+        except ValueError:
+            gain = 100
+
+        logger.info(f"发送增益设置: value={gain}")
+        self._send(build_set_gain(value=gain))
+
+        #白平衡设置
+        wb_mode = 0 if self.wb_mode_var.get() == "自动" else 1
+        logger.info(f"发送白平衡设置: mode={wb_mode}")
+        self._send(build_set_white_balance(mode=wb_mode))
+
+    def _on_query_status(self):
+        """查询状态按钮点击"""
+        logger.info("发送查询状态命令")
+        self._send(build_query_status())
+
+    def _on_query_params(self):
+        """查询参数按钮点击"""
+        logger.info("发送查询参数命令")
+        self._send(build_query_params())
+
+    def _on_query_resolutions(self):
+        """查询分辨率列表按钮点击"""
+        logger.info("发送查询分辨率列表命令")
+        self._send(build_query_resolutions())
+
+    def set_enabled(self, enabled: bool):
+        """
+        设置控制面板启用/禁用状态
+
+        Args:
+            enabled: True启用，False禁用
+        """
+        state = tk.NORMAL if enabled else tk.DISABLED
+
+        #拍照
+        self.capture_btn.config(state=state)
+
+        #录像
+        self.record_duration_entry.config(state=state)
+        self.record_res_combo.config(state="readonly" if enabled else tk.DISABLED)
+        self.record_fps_combo.config(state="readonly" if enabled else tk.DISABLED)
+        self.record_start_btn.config(state=state if not self._is_recording else tk.DISABLED)
+        self.record_stop_btn.config(state=state if self._is_recording else tk.DISABLED)
+
+        #预览
+        self.preview_res_combo.config(state="readonly" if enabled else tk.DISABLED)
+        self.preview_fps_combo.config(state="readonly" if enabled else tk.DISABLED)
+        self.preview_start_btn.config(state=state if not self._is_previewing else tk.DISABLED)
+        self.preview_stop_btn.config(state=state if self._is_previewing else tk.DISABLED)
+
+        #参数
+        self.exposure_mode_combo.config(state="readonly" if enabled else tk.DISABLED)
+        if enabled and self.exposure_mode_var.get() == "手动":
+            self.exposure_value_entry.config(state=tk.NORMAL)
+        else:
+            self.exposure_value_entry.config(state=tk.DISABLED)
+        self.gain_entry.config(state=state)
+        self.wb_mode_combo.config(state="readonly" if enabled else tk.DISABLED)
+        self.apply_params_btn.config(state=state)
+
+        #查询
+        self.query_status_btn.config(state=state)
+        self.query_params_btn.config(state=state)
+        self.query_res_btn.config(state=state)
+
+    def set_recording_state(self, is_recording: bool):
+        """
+        设置录像状态
+
+        Args:
+            is_recording: 是否正在录像
+        """
+        self._is_recording = is_recording
+
+        if is_recording:
+            self.record_status_label.config(text="录像中...", foreground="red")
+            self.record_start_btn.config(state=tk.DISABLED)
+            self.record_stop_btn.config(state=tk.NORMAL)
+            #录像时禁用拍照
+            self.capture_btn.config(state=tk.DISABLED)
+        else:
+            self.record_status_label.config(text="未录像", foreground="gray")
+            self.record_start_btn.config(state=tk.NORMAL)
+            self.record_stop_btn.config(state=tk.DISABLED)
+            self.capture_btn.config(state=tk.NORMAL)
+
+    def set_preview_state(self, is_previewing: bool):
+        """
+        设置预览状态
+
+        Args:
+            is_previewing: 是否正在预览
+        """
+        self._is_previewing = is_previewing
+
+        if is_previewing:
+            self.preview_status_label.config(text="预览中...", foreground="green")
+            self.preview_start_btn.config(state=tk.DISABLED)
+            self.preview_stop_btn.config(state=tk.NORMAL)
+        else:
+            self.preview_status_label.config(text="未预览", foreground="gray")
+            self.preview_start_btn.config(state=tk.NORMAL)
+            self.preview_stop_btn.config(state=tk.DISABLED)
+
+    def set_last_capture_file(self, filename: str):
+        """
+        设置最后拍照的文件名
+
+        Args:
+            filename: 文件名
+        """
+        self._last_capture_file = filename
+        self.capture_file_label.config(text=filename, foreground="blue")
+
+    def update_params(self, exposure_mode: int, exposure_value: int, gain: int, wb_mode: int):
+        """
+        更新参数显示
+
+        Args:
+            exposure_mode: 曝光模式（0-自动，1-手动）
+            exposure_value: 曝光值（微秒）
+            gain: 增益值
+            wb_mode: 白平衡模式（0-自动，1-手动）
+        """
+        self.exposure_mode_var.set("自动" if exposure_mode == 0 else "手动")
+        self.exposure_value_var.set(str(exposure_value))
+        self.gain_var.set(str(gain))
+        self.wb_mode_var.set("自动" if wb_mode == 0 else "手动")
+
+        #更新曝光输入框状态
+        self._on_exposure_mode_changed()
+
+
+if __name__ == '__main__':
+    #测试代码
+    import sys
+    logger.remove()
+    logger.add(sys.stdout, level="DEBUG")
+
+    def mock_send(data: bytes) -> bool:
+        print(f"发送数据: {data.hex().upper()}")
+        return True
+
+    root = tk.Tk()
+    root.title("控制面板测试")
+    root.geometry("300x700")
+
+    panel = ControlPanel(root, mock_send)
+    panel.pack(fill=tk.BOTH, expand=True)
+
+    #测试状态设置
+    root.after(2000, lambda: panel.set_recording_state(True))
+    root.after(4000, lambda: panel.set_recording_state(False))
+    root.after(3000, lambda: panel.set_preview_state(True))
+    root.after(5000, lambda: panel.set_last_capture_file("IMG_20260121_120000.jpg"))
+
+    root.mainloop()
