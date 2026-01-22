@@ -11,7 +11,7 @@
 """
 
 import tkinter as tk
-from tkinter import ttk
+from tkinter import ttk, messagebox
 from typing import Callable, Optional
 from loguru import logger
 
@@ -399,22 +399,39 @@ class ControlPanel(ttk.Frame):
         logger.info("发送拍照命令")
         self._send(build_capture())
 
+    def _show_input_warning(self, field_name: str, invalid_value: str, default_value):
+        """
+        显示输入验证警告
+
+        Args:
+            field_name: 字段名称
+            invalid_value: 非法输入值
+            default_value: 使用的默认值
+        """
+        msg = f"输入值 '{invalid_value}' 无效，已使用默认值 {default_value}"
+        logger.warning(f"{field_name}: {msg}")
+        messagebox.showwarning("输入验证警告", f"{field_name}: {msg}")
+
     def _on_record_start(self):
         """开始录像按钮点击"""
+        duration_str = self.record_duration_var.get()
         try:
-            duration = int(self.record_duration_var.get())
+            duration = int(duration_str)
             if duration < 0:
                 duration = 0
         except ValueError:
             duration = 0
+            self._show_input_warning("录像时长", duration_str, duration)
 
         res_index = self._get_resolution_index(self.record_res_var.get())
 
+        fps_str = self.record_fps_var.get()
         try:
-            fps = int(self.record_fps_var.get())
+            fps = int(fps_str)
             fps = max(1, min(30, fps))
         except ValueError:
             fps = 5
+            self._show_input_warning("录像帧率", fps_str, fps)
 
         logger.info(f"发送开始录像命令: duration={duration}, res_index={res_index}, fps={fps}")
         self._send(build_record_start(duration=duration, resolution_index=res_index, fps=fps))
@@ -428,11 +445,13 @@ class ControlPanel(ttk.Frame):
         """开启预览按钮点击"""
         res_index = self._get_resolution_index(self.preview_res_var.get())
 
+        fps_str = self.preview_fps_var.get()
         try:
-            fps = int(self.preview_fps_var.get())
+            fps = int(fps_str)
             fps = max(5, min(30, fps))
         except ValueError:
             fps = 10
+            self._show_input_warning("预览帧率", fps_str, fps)
 
         logger.info(f"发送开启预览命令: res_index={res_index}, fps={fps}")
         self._send(build_preview_start(resolution_index=res_index, fps=fps))
@@ -446,11 +465,13 @@ class ControlPanel(ttk.Frame):
         """应用参数按钮点击"""
         #曝光设置
         exp_mode = 0 if self.exposure_mode_var.get() == "自动" else 1
+        exp_str = self.exposure_value_var.get()
         try:
-            exp_value = int(self.exposure_value_var.get())
+            exp_value = int(exp_str)
             exp_value = max(0, exp_value)
         except ValueError:
             exp_value = 10000
+            self._show_input_warning("曝光时间", exp_str, exp_value)
 
         logger.info(f"发送曝光设置: mode={exp_mode}, value={exp_value}")
         self._send(build_set_exposure(mode=exp_mode, value=exp_value))
@@ -462,11 +483,13 @@ class ControlPanel(ttk.Frame):
 
         #增益设置（仅在手动模式下发送）
         if not self.gain_auto_var.get():
+            gain_str = self.gain_var.get()
             try:
-                gain = int(self.gain_var.get())
+                gain = int(gain_str)
                 gain = max(0, min(1000, gain))
             except ValueError:
                 gain = 100
+                self._show_input_warning("增益", gain_str, gain)
 
             logger.info(f"发送增益设置: value={gain}")
             self._send(build_set_gain(value=gain))
@@ -478,11 +501,13 @@ class ControlPanel(ttk.Frame):
 
         #帧率设置
         fps_enable = self.fps_limit_var.get()
+        fps_str = self.fps_var.get()
         try:
-            fps_value = float(self.fps_var.get())
+            fps_value = float(fps_str)
             fps_value = max(1.0, min(30.0, fps_value))
         except ValueError:
             fps_value = 30.0
+            self._show_input_warning("帧率", fps_str, fps_value)
 
         #帧率值转换为整数（帧率*100）
         fps_int = int(fps_value * 100)
