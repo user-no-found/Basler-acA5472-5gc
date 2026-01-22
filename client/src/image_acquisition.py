@@ -205,7 +205,7 @@ class ImageAcquisition:
     def start_continuous(self, fps: int, callback: Callable[[np.ndarray, int], None],
                          mode: AcquisitionMode = AcquisitionMode.RECORDING,
                          duration: int = 0,
-                         resolution_index: int = 0) -> bool:
+                         resolution_index: int = 0) -> Tuple[bool, Optional[int]]:
         """
         启动连续采集
 
@@ -217,20 +217,21 @@ class ImageAcquisition:
             resolution_index: 分辨率索引（0=1920x1080, 1=1280x720, 2=640x480）
 
         Returns:
-            bool: 是否启动成功
+            Tuple[bool, Optional[int]]: (是否启动成功, 错误码或None)
         """
         with self._lock:
             if self._running:
                 logger.warning("采集已在运行中")
-                return False
+                return False, ErrorCode.STATE_RECORDING
 
             if not PYPYLON_AVAILABLE:
                 logger.error("pypylon未安装，无法启动采集")
-                return False
+                return False, ErrorCode.CAMERA_NOT_CONNECTED
 
             if self._camera is None or not self._camera.is_connected:
                 logger.error("相机未连接，无法启动采集")
-                return False
+                self._report_error(ErrorCode.CAMERA_NOT_CONNECTED, "相机未连接")
+                return False, ErrorCode.CAMERA_NOT_CONNECTED
 
             #验证帧率范围
             fps = max(1, min(30, fps))
@@ -254,6 +255,8 @@ class ImageAcquisition:
             self._frame_count = 0
             self._start_time = time.time()
             self._actual_fps = 0.0
+            self._timeout_count = 0
+            self._last_error_code = None
 
             #清空队列
             while not self._frame_queue.empty():
@@ -272,7 +275,7 @@ class ImageAcquisition:
             self._acquisition_thread.start()
 
             logger.info(f"连续采集已启动: 模式={mode.name}, 帧率={fps}, 分辨率={resolution}, 时长={duration}秒")
-            return True
+            return True, None
 
     def stop_continuous(self) -> bool:
         """
@@ -313,7 +316,14 @@ class ImageAcquisition:
         self._complete_callback = callback
 
     def _acquisition_loop(self) -> None:
-        """采集循环"""
+        """
+        采集循环
+
+        异常处理:
+        - 采集超时: 记录警告，继续尝试，连续超时达到阈值则停止
+        - 相机断线: 检测并报告错误
+        - 其他异常: 记录错误并停止采集
+        """
         frame_interval = 1.0 / self._config.fps
         next_frame_time = time.time()
         duration_end_time = 0
@@ -328,12 +338,18 @@ class ImageAcquisition:
             #获取pypylon相机对象
             if not hasattr(self._camera, '_camera') or self._camera._camera is None:
                 logger.error("无法获取pypylon相机对象")
+                self._report_error(ErrorCode.CAMERA_NOT_CONNECTED, "无法获取相机对象")
                 return
 
             camera = self._camera._camera
 
             #开始连续采集
-            camera.StartGrabbing(pylon.GrabStrategy_LatestImageOnly)
+            try:
+                camera.StartGrabbing(pylon.GrabStrategy_LatestImageOnly)
+            except pylon.RuntimeException as e:
+                logger.error(f"启动采集失败: {e}")
+                self._report_error(ErrorCode.CAMERA_DISCONNECTED, f"启动采集失败: {e}")
+                return
 
             while self._running:
                 #检查是否到达录像时长
@@ -356,6 +372,9 @@ class ImageAcquisition:
                     )
 
                     if grab_result.GrabSucceeded():
+                        #重置超时计数
+                        self._timeout_count = 0
+
                         #获取图像数据
                         image = grab_result.Array.copy()
                         self._frame_count += 1
@@ -371,18 +390,41 @@ class ImageAcquisition:
                         elapsed = time.time() - self._start_time
                         if elapsed > 0:
                             self._actual_fps = self._frame_count / elapsed
+                    else:
+                        error_desc = grab_result.ErrorDescription if hasattr(grab_result, 'ErrorDescription') else "未知错误"
+                        logger.warning(f"采集失败: {error_desc}")
 
                     grab_result.Release()
 
                 except pylon.TimeoutException:
-                    logger.warning("采集超时")
+                    self._timeout_count += 1
+                    logger.warning(f"采集超时 (第{self._timeout_count}次)")
+
+                    #检查是否达到最大超时次数
+                    if self._timeout_count >= self.MAX_TIMEOUT_COUNT:
+                        logger.error(f"连续超时达到{self.MAX_TIMEOUT_COUNT}次，停止采集")
+                        self._report_error(ErrorCode.CAMERA_GRAB_TIMEOUT, "连续采集超时")
+                        break
                     continue
+
+                except pylon.RuntimeException as e:
+                    logger.error(f"采集异常（pypylon）: {e}")
+                    #检测是否断线
+                    if self._camera and hasattr(self._camera, '_check_connection'):
+                        if not self._camera._check_connection():
+                            self._report_error(ErrorCode.CAMERA_DISCONNECTED, "相机断线")
+                            break
+                    self._report_error(ErrorCode.CAMERA_GRAB_TIMEOUT, f"采集异常: {e}")
+                    break
+
                 except Exception as e:
                     logger.error(f"采集异常: {e}")
+                    self._report_error(ErrorCode.CAMERA_GRAB_TIMEOUT, f"采集异常: {e}")
                     break
 
         except Exception as e:
             logger.error(f"采集循环异常: {e}")
+            self._report_error(ErrorCode.CAMERA_GRAB_TIMEOUT, f"采集循环异常: {e}")
         finally:
             #停止采集
             try:
@@ -471,6 +513,9 @@ class PreviewAcquisition:
     - 分辨率缩放
     - JPEG编码
     - 异步帧推送
+
+    说明:
+        相机已配置为BGR8直出，无需软件格式转换
     """
 
     def __init__(self, camera_controller=None):
@@ -679,6 +724,9 @@ class PreviewAcquisition:
         - 跳帧策略（网络拥塞时跳过帧）
         - 动态JPEG质量调整
         - 性能监控
+
+        说明:
+            相机已配置为BGR8直出，无需软件格式转换
         """
         frame_interval = 1.0 / self._config.fps
         target_width = self._config.width
@@ -731,7 +779,7 @@ class PreviewAcquisition:
                                 min(self._config.max_quality, state.recommended_quality)
                             )
 
-                        #获取图像数据（避免不必要的复制）
+                        #BGR8直出，直接获取图像数据
                         image = grab_result.Array
 
                         #缩放图像
