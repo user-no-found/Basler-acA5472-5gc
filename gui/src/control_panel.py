@@ -19,6 +19,7 @@ from protocol_builder import (
     build_capture, build_record_start, build_record_stop,
     build_preview_start, build_preview_stop,
     build_set_exposure, build_set_gain, build_set_white_balance,
+    build_set_gain_auto, build_set_frame_rate, build_set_pixel_format,
     build_query_status, build_query_params, build_query_resolutions
 )
 from error_codes import get_error_message
@@ -34,6 +35,15 @@ RESOLUTION_OPTIONS = [
 #帧率选项
 RECORD_FPS_OPTIONS = list(range(1, 31))  #1-30
 PREVIEW_FPS_OPTIONS = list(range(5, 31))  #5-30
+
+#像素格式选项
+PIXEL_FORMAT_OPTIONS = [
+    ("BayerRG8", 0),
+    ("BayerRG12", 1),
+    ("BGR8", 2),
+    ("RGB8", 3),
+    ("Mono8", 4),
+]
 
 
 class ControlPanel(ttk.Frame):
@@ -241,13 +251,26 @@ class ControlPanel(ttk.Frame):
         self.exposure_value_entry.pack(side=tk.LEFT, padx=(5, 0))
         ttk.Label(exp_val_frame, text="us").pack(side=tk.LEFT, padx=(2, 0))
 
+        #自动增益开关
+        gain_auto_frame = ttk.Frame(frame)
+        gain_auto_frame.pack(fill=tk.X, pady=2)
+
+        self.gain_auto_var = tk.BooleanVar(value=True)
+        self.gain_auto_check = ttk.Checkbutton(
+            gain_auto_frame,
+            text="自动增益",
+            variable=self.gain_auto_var,
+            command=self._on_gain_auto_changed
+        )
+        self.gain_auto_check.pack(side=tk.LEFT)
+
         #增益
         gain_frame = ttk.Frame(frame)
         gain_frame.pack(fill=tk.X, pady=2)
 
         ttk.Label(gain_frame, text="增益:").pack(side=tk.LEFT)
         self.gain_var = tk.StringVar(value="100")
-        self.gain_entry = ttk.Entry(gain_frame, textvariable=self.gain_var, width=10)
+        self.gain_entry = ttk.Entry(gain_frame, textvariable=self.gain_var, width=10, state=tk.DISABLED)
         self.gain_entry.pack(side=tk.LEFT, padx=(5, 0))
         ttk.Label(gain_frame, text="(0-1000)").pack(side=tk.LEFT, padx=(2, 0))
 
@@ -265,6 +288,51 @@ class ControlPanel(ttk.Frame):
             width=8
         )
         self.wb_mode_combo.pack(side=tk.LEFT, padx=(5, 0))
+
+        #帧率限制
+        fps_limit_frame = ttk.Frame(frame)
+        fps_limit_frame.pack(fill=tk.X, pady=2)
+
+        self.fps_limit_var = tk.BooleanVar(value=False)
+        self.fps_limit_check = ttk.Checkbutton(
+            fps_limit_frame,
+            text="帧率限制",
+            variable=self.fps_limit_var,
+            command=self._on_fps_limit_changed
+        )
+        self.fps_limit_check.pack(side=tk.LEFT)
+
+        #帧率设置
+        fps_frame = ttk.Frame(frame)
+        fps_frame.pack(fill=tk.X, pady=2)
+
+        ttk.Label(fps_frame, text="帧率:").pack(side=tk.LEFT)
+        self.fps_var = tk.StringVar(value="30")
+        self.fps_spinbox = ttk.Spinbox(
+            fps_frame,
+            textvariable=self.fps_var,
+            from_=1,
+            to=30,
+            width=8,
+            state=tk.DISABLED
+        )
+        self.fps_spinbox.pack(side=tk.LEFT, padx=(5, 0))
+        ttk.Label(fps_frame, text="Hz").pack(side=tk.LEFT, padx=(2, 0))
+
+        #像素格式选择
+        pixel_format_frame = ttk.Frame(frame)
+        pixel_format_frame.pack(fill=tk.X, pady=2)
+
+        ttk.Label(pixel_format_frame, text="像素格式:").pack(side=tk.LEFT)
+        self.pixel_format_var = tk.StringVar(value=PIXEL_FORMAT_OPTIONS[0][0])
+        self.pixel_format_combo = ttk.Combobox(
+            pixel_format_frame,
+            textvariable=self.pixel_format_var,
+            values=[pf[0] for pf in PIXEL_FORMAT_OPTIONS],
+            state="readonly",
+            width=12
+        )
+        self.pixel_format_combo.pack(side=tk.LEFT, padx=(5, 0))
 
         #应用按钮
         self.apply_params_btn = ttk.Button(frame, text="应用参数", command=self._on_apply_params)
@@ -300,6 +368,31 @@ class ControlPanel(ttk.Frame):
             self.exposure_value_entry.config(state=tk.NORMAL)
         else:
             self.exposure_value_entry.config(state=tk.DISABLED)
+
+    def _on_gain_auto_changed(self):
+        """自动增益开关变化"""
+        if self.gain_auto_var.get():
+            #自动增益开启，禁用手动增益输入
+            self.gain_entry.config(state=tk.DISABLED)
+        else:
+            #自动增益关闭，启用手动增益输入
+            self.gain_entry.config(state=tk.NORMAL)
+
+    def _on_fps_limit_changed(self):
+        """帧率限制开关变化"""
+        if self.fps_limit_var.get():
+            #帧率限制开启，启用帧率输入
+            self.fps_spinbox.config(state=tk.NORMAL)
+        else:
+            #帧率限制关闭，禁用帧率输入
+            self.fps_spinbox.config(state=tk.DISABLED)
+
+    def _get_pixel_format_index(self, format_name: str) -> int:
+        """获取像素格式索引"""
+        for name, index in PIXEL_FORMAT_OPTIONS:
+            if name == format_name:
+                return index
+        return 0
 
     def _on_capture(self):
         """拍照按钮点击"""
@@ -362,20 +455,44 @@ class ControlPanel(ttk.Frame):
         logger.info(f"发送曝光设置: mode={exp_mode}, value={exp_value}")
         self._send(build_set_exposure(mode=exp_mode, value=exp_value))
 
-        #增益设置
-        try:
-            gain = int(self.gain_var.get())
-            gain = max(0, min(1000, gain))
-        except ValueError:
-            gain = 100
+        #自动增益设置
+        gain_auto = 1 if self.gain_auto_var.get() else 0
+        logger.info(f"发送自动增益设置: mode={gain_auto}")
+        self._send(build_set_gain_auto(mode=gain_auto))
 
-        logger.info(f"发送增益设置: value={gain}")
-        self._send(build_set_gain(value=gain))
+        #增益设置（仅在手动模式下发送）
+        if not self.gain_auto_var.get():
+            try:
+                gain = int(self.gain_var.get())
+                gain = max(0, min(1000, gain))
+            except ValueError:
+                gain = 100
+
+            logger.info(f"发送增益设置: value={gain}")
+            self._send(build_set_gain(value=gain))
 
         #白平衡设置
         wb_mode = 0 if self.wb_mode_var.get() == "自动" else 1
         logger.info(f"发送白平衡设置: mode={wb_mode}")
         self._send(build_set_white_balance(mode=wb_mode))
+
+        #帧率设置
+        fps_enable = self.fps_limit_var.get()
+        try:
+            fps_value = float(self.fps_var.get())
+            fps_value = max(1.0, min(30.0, fps_value))
+        except ValueError:
+            fps_value = 30.0
+
+        #帧率值转换为整数（帧率*100）
+        fps_int = int(fps_value * 100)
+        logger.info(f"发送帧率设置: enable={fps_enable}, fps={fps_value}")
+        self._send(build_set_frame_rate(fps=fps_int))
+
+        #像素格式设置
+        pixel_format_index = self._get_pixel_format_index(self.pixel_format_var.get())
+        logger.info(f"发送像素格式设置: format_index={pixel_format_index}")
+        self._send(build_set_pixel_format(format_index=pixel_format_index))
 
     def _on_query_status(self):
         """查询状态按钮点击"""
@@ -423,8 +540,26 @@ class ControlPanel(ttk.Frame):
             self.exposure_value_entry.config(state=tk.NORMAL)
         else:
             self.exposure_value_entry.config(state=tk.DISABLED)
-        self.gain_entry.config(state=state)
+
+        #自动增益
+        self.gain_auto_check.config(state=state)
+        if enabled and not self.gain_auto_var.get():
+            self.gain_entry.config(state=tk.NORMAL)
+        else:
+            self.gain_entry.config(state=tk.DISABLED)
+
         self.wb_mode_combo.config(state="readonly" if enabled else tk.DISABLED)
+
+        #帧率限制
+        self.fps_limit_check.config(state=state)
+        if enabled and self.fps_limit_var.get():
+            self.fps_spinbox.config(state=tk.NORMAL)
+        else:
+            self.fps_spinbox.config(state=tk.DISABLED)
+
+        #像素格式
+        self.pixel_format_combo.config(state="readonly" if enabled else tk.DISABLED)
+
         self.apply_params_btn.config(state=state)
 
         #查询
@@ -481,7 +616,9 @@ class ControlPanel(ttk.Frame):
         self._last_capture_file = filename
         self.capture_file_label.config(text=filename, foreground="blue")
 
-    def update_params(self, exposure_mode: int, exposure_value: int, gain: int, wb_mode: int):
+    def update_params(self, exposure_mode: int, exposure_value: int, gain: int, wb_mode: int,
+                      gain_auto: bool = True, fps_limit: bool = False, fps: float = 30.0,
+                      pixel_format_index: int = 0):
         """
         更新参数显示
 
@@ -490,11 +627,28 @@ class ControlPanel(ttk.Frame):
             exposure_value: 曝光值（微秒）
             gain: 增益值
             wb_mode: 白平衡模式（0-自动，1-手动）
+            gain_auto: 自动增益是否开启
+            fps_limit: 帧率限制是否开启
+            fps: 帧率值
+            pixel_format_index: 像素格式索引
         """
         self.exposure_mode_var.set("自动" if exposure_mode == 0 else "手动")
         self.exposure_value_var.set(str(exposure_value))
         self.gain_var.set(str(gain))
         self.wb_mode_var.set("自动" if wb_mode == 0 else "手动")
+
+        #更新自动增益
+        self.gain_auto_var.set(gain_auto)
+        self._on_gain_auto_changed()
+
+        #更新帧率限制
+        self.fps_limit_var.set(fps_limit)
+        self.fps_var.set(str(fps))
+        self._on_fps_limit_changed()
+
+        #更新像素格式
+        if 0 <= pixel_format_index < len(PIXEL_FORMAT_OPTIONS):
+            self.pixel_format_var.set(PIXEL_FORMAT_OPTIONS[pixel_format_index][0])
 
         #更新曝光输入框状态
         self._on_exposure_mode_changed()
