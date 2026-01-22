@@ -143,6 +143,22 @@ class ImageAcquisition:
 
         logger.info("图像采集器初始化完成")
 
+    def __del__(self):
+        """
+        析构函数，确保线程资源被正确清理
+
+        即使调用者忘记调用stop方法，也能在对象销毁时停止线程
+        """
+        try:
+            if self._running:
+                self._running = False
+                if self._acquisition_thread and self._acquisition_thread.is_alive():
+                    self._acquisition_thread.join(timeout=1.0)
+                logger.debug("ImageAcquisition析构：线程已清理")
+        except Exception as e:
+            #析构函数中不应抛出异常
+            pass
+
     @property
     def mode(self) -> AcquisitionMode:
         """获取当前采集模式"""
@@ -571,6 +587,26 @@ class PreviewAcquisition:
         self._current_quality = 80
 
         logger.info("预览采集器初始化完成")
+
+    def __del__(self):
+        """
+        析构函数，确保线程资源被正确清理
+
+        即使调用者忘记调用stop_preview方法，也能在对象销毁时停止线程
+        """
+        try:
+            if self._running:
+                self._running = False
+                if self._preview_thread and self._preview_thread.is_alive():
+                    self._preview_thread.join(timeout=1.0)
+                #清理缓冲池
+                if self._buffer_pool:
+                    self._buffer_pool.clear()
+                    self._buffer_pool = None
+                logger.debug("PreviewAcquisition析构：线程已清理")
+        except Exception as e:
+            #析构函数中不应抛出异常
+            pass
 
     @property
     def is_previewing(self) -> bool:
