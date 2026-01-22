@@ -72,9 +72,21 @@ class TCPServer:
 
     #分辨率索引映射
     RESOLUTION_MAP = {
-        0: (1920, 1080),
-        1: (1280, 720),
-        2: (640, 480),
+        0: (5472, 3648),
+        1: (4096, 2160),
+        2: (3840, 2160),
+        3: (2736, 1824),
+        4: (1920, 1080),
+        5: (1280, 720),
+        6: (640, 480),
+    }
+    #像素格式索引映射
+    PIXEL_FORMAT_MAP = {
+        0: "BayerRG8",
+        1: "BayerRG12",
+        2: "BGR8",
+        3: "RGB8",
+        4: "Mono8",
     }
 
     #========== 性能优化常量 ==========
@@ -147,6 +159,8 @@ class TCPServer:
     def _register_builtin_handlers(self):
         """注册内置命令处理器"""
         self.register_handler(CommandCode.HEARTBEAT, self._handle_heartbeat)
+        #注册拍照处理器
+        self.register_handler(CommandCode.CAPTURE_SINGLE, self._handle_capture)
         #注册状态查询处理器
         self.register_handler(CommandCode.QUERY_STATUS, self._handle_query_status)
         self.register_handler(CommandCode.QUERY_PARAMS, self._handle_query_params)
@@ -156,6 +170,9 @@ class TCPServer:
         self.register_handler(CommandCode.SET_WHITE_BALANCE, self._handle_set_white_balance)
         self.register_handler(CommandCode.SET_GAIN, self._handle_set_gain)
         self.register_handler(CommandCode.SET_RESOLUTION, self._handle_set_resolution)
+        self.register_handler(CommandCode.SET_GAIN_AUTO, self._handle_set_gain_auto)
+        self.register_handler(CommandCode.SET_FRAME_RATE, self._handle_set_frame_rate)
+        self.register_handler(CommandCode.SET_PIXEL_FORMAT, self._handle_set_pixel_format)
         #注册录像控制处理器
         self.register_handler(CommandCode.RECORD_START, self._handle_record_start)
         self.register_handler(CommandCode.RECORD_STOP, self._handle_record_stop)
@@ -531,9 +548,10 @@ class TCPServer:
             if mode == 0:
                 #自动曝光
                 success = self._camera.set_exposure_auto(True)
+                error_code = ErrorCode.CAMERA_PARAM_FAILED if not success else None
             else:
                 #手动曝光
-                success = self._camera.set_exposure(exposure_us, ExposureMode.MANUAL)
+                success, error_code = self._camera.set_exposure(exposure_us, ExposureMode.MANUAL)
 
             if success:
                 logger.info(f"曝光设置成功: 模式={'自动' if mode == 0 else '手动'}, 值={exposure_us}us")
@@ -541,7 +559,7 @@ class TCPServer:
             else:
                 logger.warning("曝光设置失败: 参数超出范围或相机不支持")
                 return ProtocolBuilder.build_error_response(
-                    frame.command, ErrorCode.CAMERA_PARAM_FAILED
+                    frame.command, error_code or ErrorCode.CAMERA_PARAM_FAILED
                 )
 
         except Exception as e:
@@ -598,10 +616,10 @@ class TCPServer:
 
             if mode == 0:
                 #自动白平衡
-                success = self._camera.set_white_balance(WhiteBalanceMode.AUTO)
+                success, error_code = self._camera.set_white_balance(WhiteBalanceMode.AUTO)
             else:
                 #手动白平衡
-                success = self._camera.set_white_balance(
+                success, error_code = self._camera.set_white_balance(
                     WhiteBalanceMode.MANUAL,
                     red_ratio=r_ratio,
                     green_ratio=g_ratio,
@@ -614,7 +632,7 @@ class TCPServer:
             else:
                 logger.warning("白平衡设置失败: 参数超出范围或相机不支持")
                 return ProtocolBuilder.build_error_response(
-                    frame.command, ErrorCode.CAMERA_PARAM_FAILED
+                    frame.command, error_code or ErrorCode.CAMERA_PARAM_FAILED
                 )
 
         except Exception as e:
@@ -666,7 +684,7 @@ class TCPServer:
 
             logger.info(f"设置增益: 协议值={gain_value}, 实际值={actual_gain:.2f}")
 
-            success = self._camera.set_gain(actual_gain)
+            success, error_code = self._camera.set_gain(actual_gain)
 
             if success:
                 logger.info(f"增益设置成功: {actual_gain:.2f}")
@@ -674,11 +692,130 @@ class TCPServer:
             else:
                 logger.warning("增益设置失败: 参数超出范围")
                 return ProtocolBuilder.build_error_response(
-                    frame.command, ErrorCode.CAMERA_PARAM_FAILED
+                    frame.command, error_code or ErrorCode.CAMERA_PARAM_FAILED
                 )
 
         except Exception as e:
             logger.error(f"设置增益异常: {e}")
+            return ProtocolBuilder.build_error_response(
+                frame.command, ErrorCode.CAMERA_PARAM_FAILED
+            )
+
+    async def _handle_set_gain_auto(self, client: ClientInfo, frame: ProtocolFrame) -> Optional[bytes]:
+        """
+        处理自动增益设置命令(0x24)
+
+        数据格式: [模式(1字节)]
+        - 模式: 0-关闭, 1-开启
+
+        Args:
+            client: 客户端信息
+            frame: 协议帧
+
+        Returns:
+            Optional[bytes]: 响应数据
+        """
+        if self._camera is None or not self._camera.is_connected:
+            logger.warning("设置自动增益失败: 相机未连接")
+            return ProtocolBuilder.build_error_response(
+                frame.command, ErrorCode.CAMERA_NOT_CONNECTED
+            )
+
+        if len(frame.data) < 1:
+            logger.warning(f"设置自动增益失败: 数据长度不足，期望1字节，实际{len(frame.data)}字节")
+            return ProtocolBuilder.build_error_response(
+                frame.command, ErrorCode.DATA_LENGTH_ERROR
+            )
+
+        try:
+            enabled = frame.data[0] == 1
+            logger.info(f"设置自动增益: {'开启' if enabled else '关闭'}")
+            success, error_code = self._camera.set_gain_auto(enabled)
+
+            if success:
+                return ProtocolBuilder.build_success_response(frame.command)
+            return ProtocolBuilder.build_error_response(
+                frame.command, error_code or ErrorCode.CAMERA_PARAM_FAILED
+            )
+        except Exception as e:
+            logger.error(f"设置自动增益异常: {e}")
+            return ProtocolBuilder.build_error_response(
+                frame.command, ErrorCode.CAMERA_PARAM_FAILED
+            )
+
+    async def _handle_set_frame_rate(self, client: ClientInfo, frame: ProtocolFrame) -> Optional[bytes]:
+        """
+        处理帧率设置命令(0x25)
+
+        数据格式: [启用1字节][帧率4字节]
+        - 启用: 0-关闭, 1-开启
+        - 帧率: fps*100，4字节大端序
+        """
+        if self._camera is None or not self._camera.is_connected:
+            logger.warning("设置帧率失败: 相机未连接")
+            return ProtocolBuilder.build_error_response(
+                frame.command, ErrorCode.CAMERA_NOT_CONNECTED
+            )
+
+        if len(frame.data) < 5:
+            logger.warning(f"设置帧率失败: 数据长度不足，期望5字节，实际{len(frame.data)}字节")
+            return ProtocolBuilder.build_error_response(
+                frame.command, ErrorCode.DATA_LENGTH_ERROR
+            )
+
+        try:
+            enable = frame.data[0] == 1
+            fps_value = struct.unpack('>I', frame.data[1:5])[0] / 100.0
+            logger.info(f"设置帧率: enable={enable}, fps={fps_value:.2f}")
+
+            success, error_code = self._camera.set_frame_rate(fps_value, enable)
+            if success:
+                return ProtocolBuilder.build_success_response(frame.command)
+            return ProtocolBuilder.build_error_response(
+                frame.command, error_code or ErrorCode.CAMERA_PARAM_FAILED
+            )
+        except Exception as e:
+            logger.error(f"设置帧率异常: {e}")
+            return ProtocolBuilder.build_error_response(
+                frame.command, ErrorCode.CAMERA_PARAM_FAILED
+            )
+
+    async def _handle_set_pixel_format(self, client: ClientInfo, frame: ProtocolFrame) -> Optional[bytes]:
+        """
+        处理像素格式设置命令(0x26)
+
+        数据格式: [格式索引1字节]
+        """
+        if self._camera is None or not self._camera.is_connected:
+            logger.warning("设置像素格式失败: 相机未连接")
+            return ProtocolBuilder.build_error_response(
+                frame.command, ErrorCode.CAMERA_NOT_CONNECTED
+            )
+
+        if len(frame.data) < 1:
+            logger.warning(f"设置像素格式失败: 数据长度不足，期望1字节，实际{len(frame.data)}字节")
+            return ProtocolBuilder.build_error_response(
+                frame.command, ErrorCode.DATA_LENGTH_ERROR
+            )
+
+        try:
+            format_index = frame.data[0]
+            if format_index not in self.PIXEL_FORMAT_MAP:
+                logger.warning(f"未知像素格式索引: {format_index}")
+                return ProtocolBuilder.build_error_response(
+                    frame.command, ErrorCode.CAMERA_PARAM_FAILED
+                )
+
+            format_name = self.PIXEL_FORMAT_MAP[format_index]
+            logger.info(f"设置像素格式: index={format_index}, name={format_name}")
+            success, error_code = self._camera.set_pixel_format(format_name)
+            if success:
+                return ProtocolBuilder.build_success_response(frame.command)
+            return ProtocolBuilder.build_error_response(
+                frame.command, error_code or ErrorCode.CAMERA_PARAM_FAILED
+            )
+        except Exception as e:
+            logger.error(f"设置像素格式异常: {e}")
             return ProtocolBuilder.build_error_response(
                 frame.command, ErrorCode.CAMERA_PARAM_FAILED
             )
@@ -729,7 +866,7 @@ class TCPServer:
                         frame.command, ErrorCode.CAMERA_UNSUPPORTED_RES
                     )
 
-            success = self._camera.set_resolution(width, height)
+            success, error_code = self._camera.set_resolution(width, height)
 
             if success:
                 logger.info(f"分辨率设置成功: {width}x{height}")
@@ -737,7 +874,7 @@ class TCPServer:
             else:
                 logger.warning(f"分辨率设置失败: {width}x{height}")
                 return ProtocolBuilder.build_error_response(
-                    frame.command, ErrorCode.CAMERA_UNSUPPORTED_RES
+                    frame.command, error_code or ErrorCode.CAMERA_UNSUPPORTED_RES
                 )
 
         except Exception as e:
@@ -1009,6 +1146,72 @@ class TCPServer:
         """服务器是否运行中"""
         return self._running
 
+    #========== 拍照控制处理器 ==========
+
+    async def _handle_capture(self, client: ClientInfo, frame: ProtocolFrame) -> Optional[bytes]:
+        """
+        处理单次拍照命令(0x10)
+
+        Args:
+            client: 客户端信息
+            frame: 协议帧
+
+        Returns:
+            Optional[bytes]: 响应数据
+        """
+        logger.info("收到拍照命令")
+
+        #检查相机是否连接
+        if self._camera is None or not self._camera.is_connected:
+            logger.warning("拍照失败: 相机未连接")
+            return ProtocolBuilder.build_error_response(
+                frame.command, ErrorCode.CAMERA_NOT_CONNECTED
+            )
+
+        #检查图像处理器
+        if self._image_processor is None:
+            logger.warning("拍照失败: 图像处理器未初始化")
+            return ProtocolBuilder.build_error_response(
+                frame.command, ErrorCode.UNKNOWN_ERROR
+            )
+
+        #检查状态冲突
+        if self._is_recording:
+            logger.warning("拍照失败: 正在录像中")
+            return ProtocolBuilder.build_error_response(
+                frame.command, ErrorCode.STATE_RECORDING
+            )
+
+        try:
+            #执行拍照
+            logger.info("开始拍照...")
+            image_array, error_code = self._camera.grab_single()
+
+            if image_array is None:
+                logger.error(f"拍照失败: 错误码 0x{error_code:04X}")
+                return ProtocolBuilder.build_error_response(
+                    frame.command, error_code
+                )
+
+            #保存图像（使用numpy数组保存方法）
+            success, result, save_error = self._image_processor.save_image_from_array(image_array)
+            if success:
+                logger.info(f"拍照成功: {result}")
+                #发送拍照完成通知，result是文件路径
+                filename = os.path.basename(result)
+                return ProtocolBuilder.build_capture_complete(filename)
+            else:
+                logger.error(f"拍照失败: {result}")
+                return ProtocolBuilder.build_error_response(
+                    frame.command, save_error or ErrorCode.FILE_CREATE_FAILED
+                )
+
+        except Exception as e:
+            logger.error(f"拍照异常: {e}")
+            return ProtocolBuilder.build_error_response(
+                frame.command, ErrorCode.UNKNOWN_ERROR
+            )
+
     #========== 录像控制处理器 ==========
 
     async def _handle_record_start(self, client: ClientInfo, frame: ProtocolFrame) -> Optional[bytes]:
@@ -1017,7 +1220,8 @@ class TCPServer:
 
         数据格式: [时长(4字节)][分辨率索引(1字节)][帧率(1字节)]
         - 时长: 秒，大端序，0表示手动停止
-        - 分辨率索引: 0=1920x1080, 1=1280x720, 2=640x480
+        - 分辨率索引: 0=5472x3648, 1=4096x2160, 2=3840x2160, 3=2736x1824,
+                     4=1920x1080, 5=1280x720, 6=640x480
         - 帧率: 1-30
 
         Args:
@@ -1220,7 +1424,8 @@ class TCPServer:
         处理开启实时预览命令(0x13)
 
         数据格式: [分辨率索引(1字节)][帧率(1字节)]
-        - 分辨率索引: 0=1920x1080, 1=1280x720, 2=640x480
+        - 分辨率索引: 0=5472x3648, 1=4096x2160, 2=3840x2160, 3=2736x1824,
+                     4=1920x1080, 5=1280x720, 6=640x480
         - 帧率: 5-30
 
         Args:

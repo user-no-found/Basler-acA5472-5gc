@@ -302,18 +302,19 @@ def build_set_gain_auto(mode: int) -> bytes:
     return build_frame(Command.SET_GAIN_AUTO, data)
 
 
-def build_set_frame_rate(fps: int) -> bytes:
+def build_set_frame_rate(fps: int, enable: bool = True) -> bytes:
     """
     构建设置帧率命令帧
 
     Args:
         fps: 帧率值（实际帧率*100，如30.5fps传入3050）
+        enable: 是否启用帧率限制
 
     Returns:
         命令帧
     """
     #帧率使用4字节大端序存储（帧率*100的整数值）
-    data = struct.pack('>I', fps)
+    data = bytes([1 if enable else 0]) + struct.pack('>I', fps)
     return build_frame(Command.SET_FRAME_RATE, data)
 
 

@@ -139,6 +139,10 @@ class CameraController:
         if config_manager:
             self._grab_timeout = config_manager.camera_grab_timeout
 
+        #图像格式转换器（当相机不支持BGR8时启用）
+        self._converter: Optional[pylon.ImageFormatConverter] = None
+        self._use_converter = False
+
         logger.info("相机控制器初始化完成")
 
     @property
@@ -334,7 +338,7 @@ class CameraController:
         if self._camera is None:
             return
 
-        #设置像素格式为BGR8（直接输出彩色）
+        #设置像素格式为BGR8（直接输出彩色），否则启用软件转换
         try:
             if hasattr(self._camera, 'PixelFormat'):
                 #检查是否支持BGR8
@@ -342,12 +346,20 @@ class CameraController:
                 if 'BGR8' in available_formats:
                     self._camera.PixelFormat.SetValue('BGR8')
                     logger.info("像素格式设置为BGR8（直接彩色输出）")
+                    self._use_converter = False
                 elif 'BGR8Packed' in available_formats:
                     self._camera.PixelFormat.SetValue('BGR8Packed')
                     logger.info("像素格式设置为BGR8Packed（直接彩色输出）")
+                    self._use_converter = False
                 else:
                     #回退到BayerRG8，需要软件转换
-                    logger.warning("相机不支持BGR8格式，使用默认Bayer格式（需软件转换）")
+                    if 'BayerRG8' in available_formats:
+                        self._camera.PixelFormat.SetValue('BayerRG8')
+                        logger.warning("相机不支持BGR8格式，已回退到BayerRG8（需软件转换）")
+                    else:
+                        logger.warning("相机不支持BGR8格式，使用默认像素格式（需软件转换）")
+                    self._use_converter = True
+                    self._ensure_converter()
         except Exception as e:
             logger.warning(f"设置像素格式失败: {e}")
 
@@ -595,6 +607,48 @@ class CameraController:
                 self._report_error(ErrorCode.CAMERA_PARAM_FAILED, error_msg)
                 return False, ErrorCode.CAMERA_PARAM_FAILED
 
+    def set_gain_auto(self, enabled: bool = True) -> Tuple[bool, Optional[int]]:
+        """
+        设置自动增益
+
+        Args:
+            enabled: 是否启用自动增益
+
+        Returns:
+            Tuple[bool, Optional[int]]: (是否设置成功, 错误码或None)
+        """
+        with self._lock:
+            if not self.is_connected or self._camera is None:
+                error_msg = "相机未连接，无法设置自动增益"
+                logger.error(error_msg)
+                self._report_error(ErrorCode.CAMERA_NOT_CONNECTED, error_msg)
+                return False, ErrorCode.CAMERA_NOT_CONNECTED
+
+            if not hasattr(self._camera, 'GainAuto'):
+                error_msg = "相机不支持自动增益"
+                logger.warning(error_msg)
+                self._report_error(ErrorCode.CAMERA_PARAM_FAILED, error_msg)
+                return False, ErrorCode.CAMERA_PARAM_FAILED
+
+            try:
+                mode = "Continuous" if enabled else "Off"
+                self._camera.GainAuto.SetValue(mode)
+                logger.info(f"自动增益设置为: {mode}")
+                return True, None
+
+            except pylon.RuntimeException as e:
+                error_msg = f"设置自动增益失败（pypylon异常）: {e}"
+                logger.error(error_msg)
+                self._report_error(ErrorCode.CAMERA_PARAM_FAILED, error_msg)
+                if not self._check_connection():
+                    self._handle_disconnection()
+                return False, ErrorCode.CAMERA_PARAM_FAILED
+            except Exception as e:
+                error_msg = f"设置自动增益失败: {e}"
+                logger.error(error_msg)
+                self._report_error(ErrorCode.CAMERA_PARAM_FAILED, error_msg)
+                return False, ErrorCode.CAMERA_PARAM_FAILED
+
     def set_white_balance(self, mode: WhiteBalanceMode = WhiteBalanceMode.AUTO,
                           red_ratio: float = 1.0, green_ratio: float = 1.0,
                           blue_ratio: float = 1.0) -> Tuple[bool, Optional[int]]:
@@ -735,6 +789,117 @@ class CameraController:
                 self._report_error(ErrorCode.CAMERA_PARAM_FAILED, error_msg)
                 return False, ErrorCode.CAMERA_PARAM_FAILED
 
+    def set_frame_rate(self, fps: float, enable: bool = True) -> Tuple[bool, Optional[int]]:
+        """
+        设置采集帧率
+
+        Args:
+            fps: 帧率值
+            enable: 是否启用帧率限制
+
+        Returns:
+            Tuple[bool, Optional[int]]: (是否设置成功, 错误码或None)
+        """
+        with self._lock:
+            if not self.is_connected or self._camera is None:
+                error_msg = "相机未连接，无法设置帧率"
+                logger.error(error_msg)
+                self._report_error(ErrorCode.CAMERA_NOT_CONNECTED, error_msg)
+                return False, ErrorCode.CAMERA_NOT_CONNECTED
+
+            if not hasattr(self._camera, 'AcquisitionFrameRate'):
+                error_msg = "相机不支持帧率设置"
+                logger.warning(error_msg)
+                self._report_error(ErrorCode.CAMERA_PARAM_FAILED, error_msg)
+                return False, ErrorCode.CAMERA_PARAM_FAILED
+
+            try:
+                if hasattr(self._camera, 'AcquisitionFrameRateEnable'):
+                    self._camera.AcquisitionFrameRateEnable.SetValue(bool(enable))
+                elif not enable:
+                    logger.warning("相机不支持帧率开关，已忽略禁用请求")
+
+                if enable:
+                    min_fps = self._camera.AcquisitionFrameRate.Min
+                    max_fps = self._camera.AcquisitionFrameRate.Max
+                    if fps < min_fps or fps > max_fps:
+                        logger.warning(f"帧率{fps}超出范围[{min_fps}, {max_fps}]，自动调整")
+                    fps = max(min_fps, min(max_fps, fps))
+                    self._camera.AcquisitionFrameRate.SetValue(fps)
+                    logger.info(f"帧率设置为: {fps:.2f} fps")
+                else:
+                    logger.info("帧率限制已关闭")
+
+                return True, None
+
+            except pylon.RuntimeException as e:
+                error_msg = f"设置帧率失败（pypylon异常）: {e}"
+                logger.error(error_msg)
+                self._report_error(ErrorCode.CAMERA_PARAM_FAILED, error_msg)
+                if not self._check_connection():
+                    self._handle_disconnection()
+                return False, ErrorCode.CAMERA_PARAM_FAILED
+            except Exception as e:
+                error_msg = f"设置帧率失败: {e}"
+                logger.error(error_msg)
+                self._report_error(ErrorCode.CAMERA_PARAM_FAILED, error_msg)
+                return False, ErrorCode.CAMERA_PARAM_FAILED
+
+    def set_pixel_format(self, format_name: str) -> Tuple[bool, Optional[int]]:
+        """
+        设置像素格式
+
+        Args:
+            format_name: 像素格式名称（如BGR8、Mono8等）
+
+        Returns:
+            Tuple[bool, Optional[int]]: (是否设置成功, 错误码或None)
+        """
+        with self._lock:
+            if not self.is_connected or self._camera is None:
+                error_msg = "相机未连接，无法设置像素格式"
+                logger.error(error_msg)
+                self._report_error(ErrorCode.CAMERA_NOT_CONNECTED, error_msg)
+                return False, ErrorCode.CAMERA_NOT_CONNECTED
+
+            if not hasattr(self._camera, 'PixelFormat'):
+                error_msg = "相机不支持像素格式设置"
+                logger.warning(error_msg)
+                self._report_error(ErrorCode.CAMERA_PARAM_FAILED, error_msg)
+                return False, ErrorCode.CAMERA_PARAM_FAILED
+
+            try:
+                available_formats = self._camera.PixelFormat.Symbolics
+                target_format = format_name
+                if format_name == "BGR8" and "BGR8" not in available_formats and "BGR8Packed" in available_formats:
+                    target_format = "BGR8Packed"
+
+                if target_format not in available_formats:
+                    error_msg = f"像素格式不支持: {format_name}"
+                    logger.warning(error_msg)
+                    self._report_error(ErrorCode.CAMERA_PARAM_FAILED, error_msg)
+                    return False, ErrorCode.CAMERA_PARAM_FAILED
+
+                self._camera.PixelFormat.SetValue(target_format)
+                self._use_converter = target_format not in ("BGR8", "BGR8Packed")
+                if self._use_converter:
+                    self._ensure_converter()
+                logger.info(f"像素格式设置为: {target_format}")
+                return True, None
+
+            except pylon.RuntimeException as e:
+                error_msg = f"设置像素格式失败（pypylon异常）: {e}"
+                logger.error(error_msg)
+                self._report_error(ErrorCode.CAMERA_PARAM_FAILED, error_msg)
+                if not self._check_connection():
+                    self._handle_disconnection()
+                return False, ErrorCode.CAMERA_PARAM_FAILED
+            except Exception as e:
+                error_msg = f"设置像素格式失败: {e}"
+                logger.error(error_msg)
+                self._report_error(ErrorCode.CAMERA_PARAM_FAILED, error_msg)
+                return False, ErrorCode.CAMERA_PARAM_FAILED
+
     #========== 图像采集 ==========
 
     def grab_single(self) -> Tuple[Optional[np.ndarray], Optional[int]]:
@@ -745,8 +910,8 @@ class CameraController:
             Tuple[Optional[np.ndarray], Optional[int]]: (图像数据, 错误码)
             成功时返回(BGR格式图像数组, None)，失败时返回(None, 错误码)
 
-        说明:
-            相机已配置为BGR8直出，无需软件格式转换
+            说明:
+                当相机不支持BGR8时自动进行软件格式转换
         """
         with self._lock:
             if not self.is_connected or self._camera is None:
@@ -764,8 +929,7 @@ class CameraController:
                 )
 
                 if grab_result.GrabSucceeded():
-                    #BGR8直出，直接获取图像数据
-                    image = grab_result.Array.copy()
+                    image = self._convert_grab_result(grab_result)
                     grab_result.Release()
                     self._camera.StopGrabbing()
                     logger.debug(f"采集成功，图像尺寸: {image.shape}")
@@ -838,6 +1002,29 @@ class CameraController:
             except Exception as e:
                 logger.error(f"获取参数失败: {e}")
                 return None
+
+    def _ensure_converter(self) -> None:
+        """确保图像格式转换器已初始化"""
+        if self._converter is None:
+            self._converter = pylon.ImageFormatConverter()
+            self._converter.OutputPixelFormat = pylon.PixelType_BGR8packed
+            self._converter.OutputBitAlignment = pylon.OutputBitAlignment_MsbAligned
+
+    def _convert_grab_result(self, grab_result) -> np.ndarray:
+        """
+        将抓取结果转换为BGR数组
+        """
+        if self._use_converter and self._converter is not None:
+            try:
+                converted = self._converter.Convert(grab_result)
+                if hasattr(converted, 'GetArray'):
+                    return converted.GetArray().copy()
+                if hasattr(converted, 'Array'):
+                    return converted.Array.copy()
+            except Exception as e:
+                logger.warning(f"图像格式转换失败，回退到原始数据: {e}")
+
+        return grab_result.Array.copy()
 
     def get_supported_resolutions(self) -> List[Tuple[int, int]]:
         """
@@ -914,6 +1101,46 @@ class CameraController:
             except Exception as e:
                 logger.error(f"获取增益范围失败: {e}")
                 return (0, 0)
+
+    def get_frame_rate_range(self) -> Tuple[float, float]:
+        """
+        获取帧率范围
+
+        Returns:
+            (最小值, 最大值)
+        """
+        with self._lock:
+            if not self.is_connected or self._camera is None:
+                return (0, 0)
+
+            if not hasattr(self._camera, 'AcquisitionFrameRate'):
+                return (0, 0)
+
+            try:
+                return (self._camera.AcquisitionFrameRate.Min, self._camera.AcquisitionFrameRate.Max)
+            except Exception as e:
+                logger.error(f"获取帧率范围失败: {e}")
+                return (0, 0)
+
+    def get_supported_pixel_formats(self) -> List[str]:
+        """
+        获取支持的像素格式列表
+
+        Returns:
+            像素格式名称列表
+        """
+        with self._lock:
+            if not self.is_connected or self._camera is None:
+                return []
+
+            if not hasattr(self._camera, 'PixelFormat'):
+                return []
+
+            try:
+                return list(self._camera.PixelFormat.Symbolics)
+            except Exception as e:
+                logger.error(f"获取像素格式列表失败: {e}")
+                return []
 
     def get_status(self) -> Dict[str, Any]:
         """

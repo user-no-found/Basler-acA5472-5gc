@@ -1,0 +1,25 @@
+{
+  "connection": {
+    "host": "127.0.0.1",
+    "port": 8899,
+    "timeout": 5,
+    "auto_reconnect": true,
+    "reconnect_interval": 5
+  },
+  "storage": {
+    "image_path": "./images",
+    "video_path": "./videos",
+    "jpeg_quality": 95
+  },
+  "preview": {
+    "resolution_index": 0,
+    "fps": 10,
+    "jpeg_quality": 80
+  },
+  "log": {
+    "level": "INFO",
+    "path": "./logs",
+    "max_size_mb": 10,
+    "backup_count": 10
+  }
+}

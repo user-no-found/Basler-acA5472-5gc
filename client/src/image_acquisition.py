@@ -100,9 +100,13 @@ class ImageAcquisition:
 
     #分辨率索引映射
     RESOLUTION_MAP = {
-        0: (1920, 1080),
-        1: (1280, 720),
-        2: (640, 480),
+        0: (5472, 3648),
+        1: (4096, 2160),
+        2: (3840, 2160),
+        3: (2736, 1824),
+        4: (1920, 1080),
+        5: (1280, 720),
+        6: (640, 480),
     }
 
     #最大连续超时次数
@@ -230,7 +234,7 @@ class ImageAcquisition:
             callback: 帧回调函数，参数为(图像数组, 帧序号)
             mode: 采集模式
             duration: 录像时长（秒），0表示手动停止
-            resolution_index: 分辨率索引（0=1920x1080, 1=1280x720, 2=640x480）
+            resolution_index: 分辨率索引（0=5472x3648 ... 6=640x480）
 
         Returns:
             Tuple[bool, Optional[int]]: (是否启动成功, 错误码或None)
@@ -392,7 +396,10 @@ class ImageAcquisition:
                         self._timeout_count = 0
 
                         #获取图像数据
-                        image = grab_result.Array.copy()
+                        if hasattr(self._camera, '_convert_grab_result'):
+                            image = self._camera._convert_grab_result(grab_result)
+                        else:
+                            image = grab_result.Array.copy()
                         self._frame_count += 1
 
                         #调用回调
@@ -514,9 +521,13 @@ class PreviewConfig:
 
 #预览分辨率映射表
 PREVIEW_RESOLUTIONS = {
-    0: (1920, 1080),    #索引0: 1920x1080
-    1: (1280, 720),     #索引1: 1280x720
-    2: (640, 480),      #索引2: 640x480
+    0: (5472, 3648),    #索引0: 5472x3648
+    1: (4096, 2160),    #索引1: 4096x2160
+    2: (3840, 2160),    #索引2: 3840x2160
+    3: (2736, 1824),    #索引3: 2736x1824
+    4: (1920, 1080),    #索引4: 1920x1080
+    5: (1280, 720),     #索引5: 1280x720
+    6: (640, 480),      #索引6: 640x480
 }
 
 
@@ -646,7 +657,7 @@ class PreviewAcquisition:
         开启实时预览
 
         Args:
-            resolution_index: 分辨率索引（0=1920x1080, 1=1280x720, 2=640x480）
+            resolution_index: 分辨率索引（0=5472x3648 ... 6=640x480）
             fps: 帧率（5-30）
 
         Returns:
@@ -815,8 +826,10 @@ class PreviewAcquisition:
                                 min(self._config.max_quality, state.recommended_quality)
                             )
 
-                        #BGR8直出，直接获取图像数据
-                        image = grab_result.Array
+                        if hasattr(self._camera, '_convert_grab_result'):
+                            image = self._camera._convert_grab_result(grab_result)
+                        else:
+                            image = grab_result.Array
 
                         #缩放图像
                         resize_start = time.perf_counter()

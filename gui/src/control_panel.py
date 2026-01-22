@@ -12,13 +12,14 @@
 
 import tkinter as tk
 from tkinter import ttk, messagebox
-from typing import Callable, Optional
+from typing import Callable, Optional, Tuple
 from loguru import logger
 
 from protocol_builder import (
     build_capture, build_record_start, build_record_stop,
     build_preview_start, build_preview_stop,
     build_set_exposure, build_set_gain, build_set_white_balance,
+    build_set_resolution,
     build_set_gain_auto, build_set_frame_rate, build_set_pixel_format,
     build_query_status, build_query_params, build_query_resolutions
 )
@@ -27,9 +28,13 @@ from error_codes import get_error_message
 
 #分辨率选项
 RESOLUTION_OPTIONS = [
-    ("1920x1080", 0, 1920, 1080),
-    ("1280x720", 1, 1280, 720),
-    ("640x480", 2, 640, 480),
+    ("5472x3648", 0, 5472, 3648),
+    ("4096x2160", 1, 4096, 2160),
+    ("3840x2160", 2, 3840, 2160),
+    ("2736x1824", 3, 2736, 1824),
+    ("1920x1080", 4, 1920, 1080),
+    ("1280x720", 5, 1280, 720),
+    ("640x480", 6, 640, 480),
 ]
 
 #帧率选项
@@ -176,7 +181,7 @@ class ControlPanel(ttk.Frame):
         res_frame.pack(fill=tk.X, pady=2)
 
         ttk.Label(res_frame, text="分辨率:").pack(side=tk.LEFT)
-        self.preview_res_var = tk.StringVar(value=RESOLUTION_OPTIONS[0][0])
+        self.preview_res_var = tk.StringVar(value=RESOLUTION_OPTIONS[-1][0])
         self.preview_res_combo = ttk.Combobox(
             res_frame,
             textvariable=self.preview_res_var,
@@ -224,6 +229,21 @@ class ControlPanel(ttk.Frame):
         """创建参数设置区域"""
         frame = ttk.LabelFrame(self, text="参数设置", padding="5")
         frame.pack(fill=tk.X, pady=(0, 5))
+
+        #分辨率设置
+        res_frame = ttk.Frame(frame)
+        res_frame.pack(fill=tk.X, pady=2)
+
+        ttk.Label(res_frame, text="分辨率:").pack(side=tk.LEFT)
+        self.param_res_var = tk.StringVar(value=RESOLUTION_OPTIONS[0][0])
+        self.param_res_combo = ttk.Combobox(
+            res_frame,
+            textvariable=self.param_res_var,
+            values=[r[0] for r in RESOLUTION_OPTIONS],
+            state="readonly",
+            width=12
+        )
+        self.param_res_combo.pack(side=tk.LEFT, padx=(5, 0))
 
         #曝光模式
         exp_mode_frame = ttk.Frame(frame)
@@ -362,6 +382,22 @@ class ControlPanel(ttk.Frame):
                 return index
         return 0
 
+    def _get_resolution_size(self, res_str: str) -> Tuple[int, int]:
+        """获取分辨率宽高"""
+        for name, index, w, h in RESOLUTION_OPTIONS:
+            if name == res_str:
+                return w, h
+        return RESOLUTION_OPTIONS[0][2], RESOLUTION_OPTIONS[0][3]
+
+    def _set_param_resolution(self, width: int, height: int) -> None:
+        """同步参数分辨率显示"""
+        label = f"{width}x{height}"
+        values = list(self.param_res_combo["values"])
+        if label not in values:
+            values = [label] + values
+            self.param_res_combo["values"] = values
+        self.param_res_var.set(label)
+
     def _on_exposure_mode_changed(self, event=None):
         """曝光模式变化"""
         if self.exposure_mode_var.get() == "手动":
@@ -463,6 +499,12 @@ class ControlPanel(ttk.Frame):
 
     def _on_apply_params(self):
         """应用参数按钮点击"""
+        #分辨率设置
+        width, height = self._get_resolution_size(self.param_res_var.get())
+
+        logger.info(f"发送分辨率设置: {width}x{height}")
+        self._send(build_set_resolution(width=width, height=height))
+
         #曝光设置
         exp_mode = 0 if self.exposure_mode_var.get() == "自动" else 1
         exp_str = self.exposure_value_var.get()
@@ -512,7 +554,7 @@ class ControlPanel(ttk.Frame):
         #帧率值转换为整数（帧率*100）
         fps_int = int(fps_value * 100)
         logger.info(f"发送帧率设置: enable={fps_enable}, fps={fps_value}")
-        self._send(build_set_frame_rate(fps=fps_int))
+        self._send(build_set_frame_rate(fps=fps_int, enable=fps_enable))
 
         #像素格式设置
         pixel_format_index = self._get_pixel_format_index(self.pixel_format_var.get())
@@ -542,6 +584,9 @@ class ControlPanel(ttk.Frame):
             enabled: True启用，False禁用
         """
         state = tk.NORMAL if enabled else tk.DISABLED
+
+        #分辨率
+        self.param_res_combo.config(state="readonly" if enabled else tk.DISABLED)
 
         #拍照
         self.capture_btn.config(state=state)
@@ -642,8 +687,9 @@ class ControlPanel(ttk.Frame):
         self.capture_file_label.config(text=filename, foreground="blue")
 
     def update_params(self, exposure_mode: int, exposure_value: int, gain: int, wb_mode: int,
-                      gain_auto: bool = True, fps_limit: bool = False, fps: float = 30.0,
-                      pixel_format_index: int = 0):
+                      width: Optional[int] = None, height: Optional[int] = None,
+                      gain_auto: Optional[bool] = None, fps_limit: Optional[bool] = None,
+                      fps: Optional[float] = None, pixel_format_index: Optional[int] = None):
         """
         更新参数显示
 
@@ -652,10 +698,12 @@ class ControlPanel(ttk.Frame):
             exposure_value: 曝光值（微秒）
             gain: 增益值
             wb_mode: 白平衡模式（0-自动，1-手动）
-            gain_auto: 自动增益是否开启
-            fps_limit: 帧率限制是否开启
-            fps: 帧率值
-            pixel_format_index: 像素格式索引
+            width: 图像宽度
+            height: 图像高度
+            gain_auto: 自动增益是否开启（None表示不更新）
+            fps_limit: 帧率限制是否开启（None表示不更新）
+            fps: 帧率值（None表示不更新）
+            pixel_format_index: 像素格式索引（None表示不更新）
         """
         self.exposure_mode_var.set("自动" if exposure_mode == 0 else "手动")
         self.exposure_value_var.set(str(exposure_value))
@@ -663,17 +711,24 @@ class ControlPanel(ttk.Frame):
         self.wb_mode_var.set("自动" if wb_mode == 0 else "手动")
 
         #更新自动增益
-        self.gain_auto_var.set(gain_auto)
-        self._on_gain_auto_changed()
+        if gain_auto is not None:
+            self.gain_auto_var.set(gain_auto)
+            self._on_gain_auto_changed()
 
         #更新帧率限制
-        self.fps_limit_var.set(fps_limit)
-        self.fps_var.set(str(fps))
-        self._on_fps_limit_changed()
+        if fps_limit is not None:
+            self.fps_limit_var.set(fps_limit)
+            self._on_fps_limit_changed()
+        if fps is not None:
+            self.fps_var.set(str(fps))
 
         #更新像素格式
-        if 0 <= pixel_format_index < len(PIXEL_FORMAT_OPTIONS):
+        if pixel_format_index is not None and 0 <= pixel_format_index < len(PIXEL_FORMAT_OPTIONS):
             self.pixel_format_var.set(PIXEL_FORMAT_OPTIONS[pixel_format_index][0])
+
+        #更新分辨率
+        if width is not None and height is not None:
+            self._set_param_resolution(width, height)
 
         #更新曝光输入框状态
         self._on_exposure_mode_changed()

@@ -49,9 +49,13 @@ class ImageProcessor:
 
     #分辨率索引映射
     RESOLUTION_MAP = {
-        0: (1920, 1080),
-        1: (1280, 720),
-        2: (640, 480),
+        0: (5472, 3648),
+        1: (4096, 2160),
+        2: (3840, 2160),
+        3: (2736, 1824),
+        4: (1920, 1080),
+        5: (1280, 720),
+        6: (640, 480),
     }
 
     def __init__(self, config_manager=None):
@@ -262,6 +266,8 @@ class ImageProcessor:
         """
         从numpy数组保存图片
 
+        使用Pillow保存图像，支持灰度图和BGR彩色图
+
         Args:
             image_array: numpy图像数组
             filename: 文件名，为None时自动生成
@@ -269,8 +275,8 @@ class ImageProcessor:
         Returns:
             Tuple[bool, str, Optional[int]]: (是否成功, 文件路径或错误信息, 错误码或None)
         """
-        if not PYPYLON_AVAILABLE:
-            return False, "pypylon未安装", 0x0102
+        if not PIL_AVAILABLE:
+            return False, "Pillow未安装", 0x0102
 
         #检查磁盘空间
         space_ok, free_mb = self.check_disk_space()
@@ -290,34 +296,20 @@ class ImageProcessor:
         full_path = self.get_full_path(filename)
 
         try:
-            #使用PylonImage从数组创建并保存
-            img = pylon.PylonImage()
-
-            #根据数组维度判断像素格式
+            #根据数组维度判断图像类型
             if len(image_array.shape) == 2:
                 #灰度图
-                pixel_type = pylon.PixelType_Mono8
+                pil_image = Image.fromarray(image_array, mode='L')
             elif len(image_array.shape) == 3 and image_array.shape[2] == 3:
-                #BGR图像
-                pixel_type = pylon.PixelType_BGR8packed
+                #BGR图像，转换为RGB
+                rgb_array = image_array[:, :, ::-1]
+                pil_image = Image.fromarray(rgb_array, mode='RGB')
             else:
                 logger.error(f"不支持的图像格式: {image_array.shape}")
                 return False, "不支持的图像格式", 0x0501
 
-            #创建PylonImage
-            height, width = image_array.shape[:2]
-            img.AttachUserBuffer(
-                image_array.tobytes(),
-                image_array.nbytes,
-                pixel_type,
-                width,
-                height,
-                0  #padding
-            )
-
             #保存为JPEG
-            img.Save(pylon.ImageFileFormat_Jpeg, full_path)
-            img.Release()
+            pil_image.save(full_path, 'JPEG', quality=self._jpeg_quality)
 
             logger.info(f"图像保存成功: {full_path}")
             return True, full_path, None

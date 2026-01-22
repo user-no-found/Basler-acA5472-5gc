@@ -1,0 +1,14 @@
+# Basler 相机控制系统 - 客户端依赖
+
+# 日志库
+loguru>=0.7.0
+
+# 图像处理
+numpy>=1.24.0
+opencv-python>=4.8.0
+
+# 图像缩放和JPEG编码（预览功能）
+Pillow>=10.0.0
+
+# Basler相机SDK（需要单独安装pylon SDK后安装）
+# pypylon>=2.0.0
