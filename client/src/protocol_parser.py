@@ -19,6 +19,10 @@ FRAME_FOOTER = b'\xEF\xEF'      #帧尾
 PROTOCOL_VERSION = 0x20          #协议版本2.0
 PROTOCOL_MAJOR_VERSION = 2       #主版本号
 
+#安全限制常量
+MAX_BUFFER_SIZE = 1 * 1024 * 1024    #缓冲区最大1MB，防止内存耗尽
+MAX_DATA_LENGTH = 10 * 1024 * 1024   #数据段最大10MB，防止恶意大包
+
 #帧结构偏移量
 HEADER_SIZE = 2                  #帧头长度
 VERSION_OFFSET = 2               #版本号偏移
@@ -93,6 +97,12 @@ class ProtocolParser:
             List[ProtocolFrame]: 解析出的完整帧列表
         """
         self._buffer.extend(data)
+
+        #安全检查：缓冲区超限时清空，防止内存耗尽攻击
+        if len(self._buffer) > MAX_BUFFER_SIZE:
+            self._buffer.clear()
+            return []
+
         frames = []
 
         while True:
@@ -127,6 +137,11 @@ class ProtocolParser:
 
         #解析长度字段（大端序，4字节）
         data_length = struct.unpack('>I', self._buffer[LENGTH_OFFSET:LENGTH_OFFSET + LENGTH_SIZE])[0]
+
+        #安全检查：数据长度超限时丢弃帧头，防止恶意大包DoS攻击
+        if data_length > MAX_DATA_LENGTH:
+            del self._buffer[:HEADER_SIZE]
+            return None
 
         #计算完整帧长度
         #帧头(2)+版本(1)+长度(4)+[命令(1)+数据(N-1)]+XOR(1)+帧尾(2)
