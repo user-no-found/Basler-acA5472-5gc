@@ -62,11 +62,11 @@ async def main():
 
     try:
         # 导入模块
-        from .tcp_server import TCPServer
-        from .camera_controller import CameraController
-        from .image_processor import ImageProcessor
-        from .image_acquisition import ImageAcquisition, PreviewAcquisition
-        from .config_manager import ConfigManager
+        from tcp_server import TCPServer
+        from camera_controller import CameraController
+        from image_processor import ImageProcessor
+        from image_acquisition import ImageAcquisition, PreviewAcquisition
+        from config_manager import ConfigManager
 
         # 加载配置
         config_path = src_dir.parent / "config" / "config.json"

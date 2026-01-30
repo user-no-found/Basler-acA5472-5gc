@@ -20,6 +20,8 @@ import asyncio
 import struct
 import os
 import socket
+import threading
+import time
 from typing import Dict, Optional, Callable, Awaitable, Any, TYPE_CHECKING
 from dataclasses import dataclass, field
 from enum import IntEnum
@@ -28,7 +30,7 @@ from collections import deque
 
 from loguru import logger
 
-from .protocol_parser import (
+from protocol_parser import (
     ProtocolParser,
     ProtocolBuilder,
     ProtocolFrame,
@@ -36,12 +38,12 @@ from .protocol_parser import (
     check_version_compatible,
     PROTOCOL_VERSION,
 )
-from .utils.errors import ErrorCode, get_error_description
+from utils.errors import ErrorCode, get_error_description
 
 if TYPE_CHECKING:
-    from .camera_controller import CameraController
-    from .image_processor import ImageProcessor
-    from .image_acquisition import ImageAcquisition, PreviewAcquisition
+    from camera_controller import CameraController
+    from image_processor import ImageProcessor
+    from image_acquisition import ImageAcquisition, PreviewAcquisition
 
 
 class ClientState(IntEnum):
@@ -145,10 +147,15 @@ class TCPServer:
         self._is_capturing = False    #正在拍照
         self._is_recording = False    #正在录像
         self._is_previewing = False   #正在预览
+        self._is_continuous = False   #正在连续拍照
 
         #录像相关
         self._recording_task: Optional[asyncio.Task] = None
         self._event_loop: Optional[asyncio.AbstractEventLoop] = None
+
+        #连续拍照相关
+        self._continuous_thread: Optional[threading.Thread] = None
+        self._continuous_stop_event = threading.Event()
 
         #========== 性能优化：发送队列 ==========
         #每个客户端的发送队列（用于批量发送）
@@ -179,6 +186,9 @@ class TCPServer:
         #注册预览控制处理器
         self.register_handler(CommandCode.PREVIEW_START, self._handle_preview_start)
         self.register_handler(CommandCode.PREVIEW_STOP, self._handle_preview_stop)
+        #注册连续拍照处理器
+        self.register_handler(CommandCode.CONTINUOUS_START, self._handle_continuous_start)
+        self.register_handler(CommandCode.CONTINUOUS_STOP, self._handle_continuous_stop)
 
     def set_camera(self, camera: 'CameraController') -> None:
         """
@@ -543,7 +553,7 @@ class TCPServer:
             logger.info(f"设置曝光: 模式={mode}, 值={exposure_us}us")
 
             #导入曝光模式枚举
-            from .camera_controller import ExposureMode
+            from camera_controller import ExposureMode
 
             if mode == 0:
                 #自动曝光
@@ -612,7 +622,7 @@ class TCPServer:
             logger.info(f"设置白平衡: 模式={mode}, R={r_ratio:.2f}, G={g_ratio:.2f}, B={b_ratio:.2f}")
 
             #导入白平衡模式枚举
-            from .camera_controller import WhiteBalanceMode
+            from camera_controller import WhiteBalanceMode
 
             if mode == 0:
                 #自动白平衡
@@ -894,7 +904,8 @@ class TCPServer:
         - bit 1: 正在拍照 (1=是)
         - bit 2: 正在录像 (1=是)
         - bit 3: 正在预览 (1=是)
-        - bit 4-7: 保留
+        - bit 4: 正在连续拍照 (1=是)
+        - bit 5-7: 保留
 
         Returns:
             int: 状态字节
@@ -916,6 +927,10 @@ class TCPServer:
         #bit 3: 正在预览
         if self._is_previewing:
             status |= 0x08
+
+        #bit 4: 正在连续拍照
+        if self._is_continuous:
+            status |= 0x10
 
         return status
 
@@ -1298,7 +1313,7 @@ class TCPServer:
                 )
 
             #导入采集模式
-            from .image_acquisition import AcquisitionMode
+            from image_acquisition import AcquisitionMode
 
             #定义帧回调函数
             def on_frame(image, frame_num):
@@ -1585,6 +1600,110 @@ class TCPServer:
             await self.send_to_controller(frame_data)
         except Exception as e:
             logger.error(f"发送预览帧异常: {e}")
+
+    #========== 连续拍照处理 ==========
+
+    async def _handle_continuous_start(self, client: ClientInfo, frame: ProtocolFrame) -> bytes:
+        """处理开始连续拍照命令"""
+        logger.info("收到开始连续拍照命令")
+
+        #检查相机
+        if self._camera is None or not self._camera.is_connected:
+            logger.error("相机未连接")
+            return ProtocolBuilder.build_error_response(
+                frame.command, ErrorCode.CAMERA_NOT_CONNECTED
+            )
+
+        #检查是否已在连续拍照
+        if self._is_continuous:
+            logger.warning("已在连续拍照中")
+            return ProtocolBuilder.build_error_response(
+                frame.command, ErrorCode.STATE_RECORDING
+            )
+
+        #检查是否在录像
+        if self._is_recording:
+            logger.warning("正在录像，无法开始连续拍照")
+            return ProtocolBuilder.build_error_response(
+                frame.command, ErrorCode.STATE_RECORDING
+            )
+
+        #保存事件循环引用
+        self._event_loop = asyncio.get_event_loop()
+
+        #启动连续拍照线程
+        self._continuous_stop_event.clear()
+        self._continuous_thread = threading.Thread(
+            target=self._continuous_capture_loop,
+            daemon=True,
+            name="ContinuousCapture"
+        )
+        self._continuous_thread.start()
+        self._is_continuous = True
+
+        logger.info("连续拍照已开始")
+        return ProtocolBuilder.build_success_response(frame.command)
+
+    async def _handle_continuous_stop(self, client: ClientInfo, frame: ProtocolFrame) -> bytes:
+        """处理停止连续拍照命令"""
+        logger.info("收到停止连续拍照命令")
+
+        if not self._is_continuous:
+            logger.warning("未在连续拍照")
+            return ProtocolBuilder.build_success_response(frame.command)
+
+        #停止连续拍照线程
+        self._continuous_stop_event.set()
+        if self._continuous_thread and self._continuous_thread.is_alive():
+            self._continuous_thread.join(timeout=3.0)
+        self._is_continuous = False
+
+        logger.info("连续拍照已停止")
+        return ProtocolBuilder.build_success_response(frame.command)
+
+    def _continuous_capture_loop(self):
+        """连续拍照线程循环，每秒拍1张"""
+        logger.info("连续拍照线程启动")
+        capture_count = 0
+
+        while not self._continuous_stop_event.is_set():
+            try:
+                #执行拍照（复用现有逻辑）
+                image_array, error_code = self._camera.grab_single()
+
+                if image_array is None:
+                    logger.error(f"连续拍照失败: 错误码 0x{error_code:04X}")
+                    time.sleep(1.0)
+                    continue
+
+                #保存图像
+                success, result, save_error = self._image_processor.save_image_from_array(image_array)
+                if success:
+                    capture_count += 1
+                    logger.info(f"连续拍照成功 [{capture_count}]: {result}")
+
+                    #发送拍照完成通知
+                    if self._event_loop:
+                        filename = os.path.basename(result)
+                        notify_frame = ProtocolBuilder.build_capture_complete(filename)
+                        asyncio.run_coroutine_threadsafe(
+                            self.send_to_controller(notify_frame),
+                            self._event_loop
+                        )
+                else:
+                    logger.error(f"连续拍照保存失败: {result}")
+
+            except Exception as e:
+                logger.error(f"连续拍照异常: {e}")
+
+            #等待1秒
+            self._continuous_stop_event.wait(timeout=1.0)
+
+        logger.info(f"连续拍照线程结束，共拍摄 {capture_count} 张")
+
+    def set_continuous(self, continuous: bool) -> None:
+        """设置连续拍照状态"""
+        self._is_continuous = continuous
 
 
 async def main():

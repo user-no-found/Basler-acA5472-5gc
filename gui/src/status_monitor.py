@@ -39,6 +39,7 @@ class StatusMonitor(ttk.Frame):
             'capturing': False,
             'recording': False,
             'previewing': False,
+            'continuous': False,
         }
 
         #参数数据
@@ -94,6 +95,7 @@ class StatusMonitor(ttk.Frame):
             ('capturing', '拍照状态'),
             ('recording', '录像状态'),
             ('previewing', '预览状态'),
+            ('continuous', '连拍状态'),
         ]
 
         for key, label_text in status_items:
@@ -189,6 +191,7 @@ class StatusMonitor(ttk.Frame):
             'capturing': bool(status & 0x02),
             'recording': bool(status & 0x04),
             'previewing': bool(status & 0x08),
+            'continuous': bool(status & 0x10),
         }
 
     def parse_params(self, data: bytes) -> Optional[Dict[str, Any]]:
@@ -236,6 +239,7 @@ class StatusMonitor(ttk.Frame):
             'capturing': ('拍照中', '空闲'),
             'recording': ('录像中', '空闲'),
             'previewing': ('开启', '关闭'),
+            'continuous': ('连拍中', '空闲'),
         }
 
         for key, (on_text, off_text) in status_text_map.items():
@@ -400,6 +404,7 @@ class StatusMonitor(ttk.Frame):
             'capturing': False,
             'recording': False,
             'previewing': False,
+            'continuous': False,
         })
 
         #重置参数显示

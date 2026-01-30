@@ -37,6 +37,8 @@ class Command:
     RECORD_STOP = 0x12      #停止录像
     PREVIEW_START = 0x13    #开启实时预览
     PREVIEW_STOP = 0x14     #停止实时预览
+    CONTINUOUS_START = 0x15 #开始连续拍照
+    CONTINUOUS_STOP = 0x16  #停止连续拍照
     SET_EXPOSURE = 0x20     #设置曝光
     SET_WHITE_BALANCE = 0x21  #设置白平衡
     SET_GAIN = 0x22         #设置增益
@@ -169,6 +171,16 @@ def build_heartbeat() -> bytes:
 def build_capture() -> bytes:
     """构建单次拍照命令帧"""
     return build_frame(Command.CAPTURE)
+
+
+def build_continuous_start() -> bytes:
+    """构建开始连续拍照命令帧"""
+    return build_frame(Command.CONTINUOUS_START)
+
+
+def build_continuous_stop() -> bytes:
+    """构建停止连续拍照命令帧"""
+    return build_frame(Command.CONTINUOUS_STOP)
 
 
 def build_record_start(duration: int = 0, resolution_index: int = 0, fps: int = 5) -> bytes:

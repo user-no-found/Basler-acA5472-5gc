@@ -18,6 +18,7 @@ from loguru import logger
 from protocol_builder import (
     build_capture, build_record_start, build_record_stop,
     build_preview_start, build_preview_stop,
+    build_continuous_start, build_continuous_stop,
     build_set_exposure, build_set_gain, build_set_white_balance,
     build_set_resolution,
     build_set_gain_auto, build_set_frame_rate, build_set_pixel_format,
@@ -68,6 +69,7 @@ class ControlPanel(ttk.Frame):
         #状态变量
         self._is_recording = False
         self._is_previewing = False
+        self._is_continuous = False
         self._last_capture_file = ""
 
         #创建界面
@@ -98,6 +100,24 @@ class ControlPanel(ttk.Frame):
         #拍照按钮
         self.capture_btn = ttk.Button(frame, text="拍照", command=self._on_capture)
         self.capture_btn.pack(fill=tk.X, pady=2)
+
+        #连续拍照按钮区域
+        continuous_frame = ttk.Frame(frame)
+        continuous_frame.pack(fill=tk.X, pady=2)
+
+        self.continuous_start_btn = ttk.Button(continuous_frame, text="开始连拍", command=self._on_continuous_start)
+        self.continuous_start_btn.pack(side=tk.LEFT, expand=True, fill=tk.X, padx=(0, 2))
+
+        self.continuous_stop_btn = ttk.Button(continuous_frame, text="停止连拍", command=self._on_continuous_stop, state=tk.DISABLED)
+        self.continuous_stop_btn.pack(side=tk.LEFT, expand=True, fill=tk.X, padx=(2, 0))
+
+        #连续拍照状态
+        continuous_status_frame = ttk.Frame(frame)
+        continuous_status_frame.pack(fill=tk.X, pady=2)
+
+        ttk.Label(continuous_status_frame, text="连拍状态:").pack(side=tk.LEFT)
+        self.continuous_status_label = ttk.Label(continuous_status_frame, text="未连拍", foreground="gray")
+        self.continuous_status_label.pack(side=tk.LEFT, padx=(5, 0))
 
         #最后拍照文件名
         file_frame = ttk.Frame(frame)
@@ -435,6 +455,16 @@ class ControlPanel(ttk.Frame):
         logger.info("发送拍照命令")
         self._send(build_capture())
 
+    def _on_continuous_start(self):
+        """开始连续拍照按钮点击"""
+        logger.info("发送开始连续拍照命令")
+        self._send(build_continuous_start())
+
+    def _on_continuous_stop(self):
+        """停止连续拍照按钮点击"""
+        logger.info("发送停止连续拍照命令")
+        self._send(build_continuous_stop())
+
     def _show_input_warning(self, field_name: str, invalid_value: str, default_value):
         """
         显示输入验证警告
@@ -591,6 +621,10 @@ class ControlPanel(ttk.Frame):
         #拍照
         self.capture_btn.config(state=state)
 
+        #连续拍照
+        self.continuous_start_btn.config(state=state if not self._is_continuous else tk.DISABLED)
+        self.continuous_stop_btn.config(state=state if self._is_continuous else tk.DISABLED)
+
         #录像
         self.record_duration_entry.config(state=state)
         self.record_res_combo.config(state="readonly" if enabled else tk.DISABLED)
@@ -675,6 +709,31 @@ class ControlPanel(ttk.Frame):
             self.preview_status_label.config(text="未预览", foreground="gray")
             self.preview_start_btn.config(state=tk.NORMAL)
             self.preview_stop_btn.config(state=tk.DISABLED)
+
+    def set_continuous_state(self, is_continuous: bool):
+        """
+        设置连续拍照状态
+
+        Args:
+            is_continuous: 是否正在连续拍照
+        """
+        self._is_continuous = is_continuous
+
+        if is_continuous:
+            self.continuous_status_label.config(text="连拍中...", foreground="orange")
+            self.continuous_start_btn.config(state=tk.DISABLED)
+            self.continuous_stop_btn.config(state=tk.NORMAL)
+            #连拍时禁用单次拍照和录像
+            self.capture_btn.config(state=tk.DISABLED)
+            self.record_start_btn.config(state=tk.DISABLED)
+        else:
+            self.continuous_status_label.config(text="未连拍", foreground="gray")
+            self.continuous_start_btn.config(state=tk.NORMAL)
+            self.continuous_stop_btn.config(state=tk.DISABLED)
+            #恢复单次拍照和录像按钮（如果不在录像中）
+            if not self._is_recording:
+                self.capture_btn.config(state=tk.NORMAL)
+                self.record_start_btn.config(state=tk.NORMAL)
 
     def set_last_capture_file(self, filename: str):
         """

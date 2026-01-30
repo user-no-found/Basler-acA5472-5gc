@@ -357,6 +357,7 @@ class MainWindow:
                     if hasattr(self, 'control_panel'):
                         self.control_panel.set_recording_state(status.get('recording', False))
                         self.control_panel.set_preview_state(status.get('previewing', False))
+                        self.control_panel.set_continuous_state(status.get('continuous', False))
                         if not status.get('previewing', False) and hasattr(self, 'preview_widget'):
                             self.preview_widget.clear()
 

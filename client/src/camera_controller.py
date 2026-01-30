@@ -29,7 +29,7 @@ except ImportError:
 
 #导入错误码
 try:
-    from .utils.errors import ErrorCode
+    from utils.errors import ErrorCode
 except ImportError:
     #独立运行时的兼容处理
     class ErrorCode:

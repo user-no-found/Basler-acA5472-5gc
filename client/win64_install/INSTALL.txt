@@ -1,0 +1,45 @@
+Basler 相机控制系统 - 离线安装包
+================================
+
+目标环境: Windows 64位
+
+文件清单:
+---------
+1. Python 安装程序:
+   - python-3.13.2-amd64.exe
+
+2. Python 依赖包 (.whl):
+   - loguru-0.7.3-py3-none-any.whl        (日志库)
+   - colorama-0.4.6-py2.py3-none-any.whl  (终端颜色，loguru依赖)
+   - win32_setctime-1.2.0-py3-none-any.whl (文件时间设置，loguru依赖)
+   - numpy-2.4.1-cp313-cp313-win_amd64.whl (数值计算)
+   - opencv_python-4.13.0.90-cp37-abi3-win_amd64.whl (图像处理)
+   - pillow-12.1.0-cp313-cp313-win_amd64.whl (图像处理)
+   - pypylon-4.2.0-cp39-abi3-win_amd64.whl (Basler相机Python接口)
+
+安装步骤:
+---------
+
+步骤1: 安装 Python
+   双击运行 python-3.13.2-amd64.exe
+   重要: 勾选 "Add Python to PATH"
+
+步骤2: 安装 Basler pylon SDK
+   从 Basler 官网下载 pylon Camera Software Suite:
+   https://www.baslerweb.com/en/downloads/software-downloads/
+   安装时勾选 "pylon SDK" 和 "pylon Viewer"
+
+步骤3: 安装 Python 依赖包
+   打开命令提示符(cmd)，进入本文件夹，执行:
+
+   pip install --no-index --find-links=. loguru colorama win32-setctime numpy opencv-python Pillow pypylon
+
+步骤4: 运行程序
+   cd ..\src
+   python main.py
+
+注意事项:
+---------
+- 这些包是为 Windows 64位 + Python 3.13 编译的
+- pypylon 是 Python 接口，需要 pylon SDK 支持
+- 如遇到权限问题，请以管理员身份运行命令提示符

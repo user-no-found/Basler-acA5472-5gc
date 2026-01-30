@@ -9,8 +9,8 @@ from enum import IntEnum
 from dataclasses import dataclass
 from typing import Optional, Tuple, List
 
-from .utils.xor_checksum import calculate_xor, verify_xor
-from .utils.errors import ErrorCode
+from utils.xor_checksum import calculate_xor, verify_xor
+from utils.errors import ErrorCode
 
 
 #协议常量
@@ -46,6 +46,8 @@ class CommandCode(IntEnum):
     RECORD_STOP = 0x12             #停止录像
     PREVIEW_START = 0x13           #开启实时预览
     PREVIEW_STOP = 0x14            #停止实时预览
+    CONTINUOUS_START = 0x15        #开始连续拍照
+    CONTINUOUS_STOP = 0x16         #停止连续拍照
     SET_EXPOSURE = 0x20            #设置曝光
     SET_WHITE_BALANCE = 0x21       #设置白平衡
     SET_GAIN = 0x22                #设置增益
