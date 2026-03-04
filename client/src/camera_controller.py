@@ -934,11 +934,14 @@ class CameraController:
         for node_name in node_names:
             if not node_name:
                 continue
-            if hasattr(self._camera, node_name):
-                try:
-                    return getattr(self._camera, node_name), node_name
-                except Exception:
-                    continue
+            # 注意：GenICam节点不存在时，hasattr也可能触发运行时异常。
+            # 这里统一使用getattr并捕获异常，避免节点探测异常外抛。
+            try:
+                node = getattr(self._camera, node_name)
+                if node is not None:
+                    return node, node_name
+            except Exception:
+                continue
 
         return None, ""
 
