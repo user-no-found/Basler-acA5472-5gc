@@ -90,6 +90,9 @@ class TCPServer:
         3: "RGB8",
         4: "Mono8",
     }
+    #协议中录像/预览帧率字段为1字节
+    PROTOCOL_FPS_MIN = 1
+    PROTOCOL_FPS_MAX = 255
 
     #========== 性能优化常量 ==========
     #发送缓冲区大小（64KB）
@@ -231,6 +234,33 @@ class TCPServer:
         #设置预览帧回调
         preview.set_preview_callback(self._on_preview_frame)
         logger.info("TCP服务器已绑定预览采集器")
+
+    def _normalize_fps(self, requested_fps: int) -> int:
+        """
+        按协议范围与相机能力范围动态裁剪帧率。
+
+        Args:
+            requested_fps: 请求帧率
+
+        Returns:
+            int: 裁剪后的帧率
+        """
+        fps = max(self.PROTOCOL_FPS_MIN, min(self.PROTOCOL_FPS_MAX, int(requested_fps)))
+
+        if self._camera and hasattr(self._camera, "get_frame_rate_range"):
+            try:
+                min_fps, max_fps = self._camera.get_frame_rate_range()
+                if max_fps > 0 and max_fps >= min_fps:
+                    if min_fps > 0 and fps < min_fps:
+                        fps = int(min_fps)
+                    if fps > max_fps:
+                        fps = int(max_fps)
+            except Exception as e:
+                logger.warning(f"读取相机帧率范围失败，沿用协议范围裁剪: {e}")
+
+        if fps < self.PROTOCOL_FPS_MIN:
+            fps = self.PROTOCOL_FPS_MIN
+        return fps
 
     def register_handler(self, cmd: int, handler: CommandHandler):
         """
@@ -1237,7 +1267,7 @@ class TCPServer:
         - 时长: 秒，大端序，0表示手动停止
         - 分辨率索引: 0=5472x3648, 1=4096x2160, 2=3840x2160, 3=2736x1824,
                      4=1920x1080, 5=1280x720, 6=640x480
-        - 帧率: 1-30
+        - 帧率: 1-255（最终按相机能力范围裁剪）
 
         Args:
             client: 客户端信息
@@ -1292,8 +1322,8 @@ class TCPServer:
             resolution_index = frame.data[4]                     #分辨率索引
             fps = frame.data[5]                                  #帧率
 
-            #验证参数
-            fps = max(1, min(30, fps))  #帧率范围1-30
+            #按协议范围与相机能力范围动态裁剪
+            fps = self._normalize_fps(fps)
             resolution = self.RESOLUTION_MAP.get(resolution_index, (1920, 1080))
 
             logger.info(f"开始录像: 时长={duration}秒, 分辨率={resolution}, 帧率={fps}")
@@ -1441,7 +1471,7 @@ class TCPServer:
         数据格式: [分辨率索引(1字节)][帧率(1字节)]
         - 分辨率索引: 0=5472x3648, 1=4096x2160, 2=3840x2160, 3=2736x1824,
                      4=1920x1080, 5=1280x720, 6=640x480
-        - 帧率: 5-30
+        - 帧率: 1-255（最终按相机能力范围裁剪）
 
         Args:
             client: 客户端信息
@@ -1487,7 +1517,7 @@ class TCPServer:
         try:
             #解析数据
             resolution_index = frame.data[0]  #分辨率索引
-            fps = frame.data[1]               #帧率
+            fps = self._normalize_fps(frame.data[1])  #帧率（动态裁剪）
 
             logger.info(f"开启预览: 分辨率索引={resolution_index}, 帧率={fps}")
 

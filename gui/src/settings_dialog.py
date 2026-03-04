@@ -313,7 +313,7 @@ class SettingsDialog:
         ttk.Label(parent, text="默认帧率(fps):").grid(row=row, column=0, sticky=tk.W, pady=5)
         self._vars["preview_fps"] = tk.IntVar(value=self._settings["preview"]["fps"])
         fps_spinbox = ttk.Spinbox(parent, textvariable=self._vars["preview_fps"],
-                                  from_=1, to=30, width=10)
+                                  from_=1, to=255, width=10)
         fps_spinbox.grid(row=row, column=1, sticky=tk.W, pady=5)
 
         #JPEG质量
@@ -432,8 +432,8 @@ class SettingsDialog:
         #验证帧率
         try:
             fps = self._vars["preview_fps"].get()
-            if not 1 <= fps <= 30:
-                errors.append(f"帧率无效: {fps}，有效范围1-30")
+            if not 1 <= fps <= 255:
+                errors.append(f"帧率无效: {fps}，有效范围1-255")
         except tk.TclError:
             errors.append("帧率必须是数字")
 

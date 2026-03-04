@@ -40,7 +40,7 @@ class ConfigManager:
             "default_resolution": [1920, 1080],
             "default_fps": 10,
             "jpeg_quality": 80,
-            "max_fps": 30
+            "max_fps": 255
         },
         "video": {
             "codec": "H264",
@@ -269,7 +269,7 @@ class ConfigManager:
     @property
     def preview_max_fps(self) -> int:
         """预览最大帧率"""
-        return self.get("preview.max_fps", 30)
+        return self.get("preview.max_fps", 255)
 
     @property
     def video_codec(self) -> str:

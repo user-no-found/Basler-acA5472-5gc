@@ -29,6 +29,10 @@ from enum import Enum
 import numpy as np
 from loguru import logger
 
+# 协议帧中 fps 使用 1 字节传输，最大可表达 255。
+PROTOCOL_FPS_MIN = 1
+PROTOCOL_FPS_MAX = 255
+
 try:
     from pypylon import pylon
     PYPYLON_AVAILABLE = True
@@ -84,6 +88,44 @@ class AcquisitionConfig:
     resolution: Tuple[int, int] = (1920, 1080)  #分辨率
     duration: int = 0               #录像时长（秒），0表示手动停止
     buffer_size: int = 30           #缓冲队列大小
+
+
+def clamp_fps_to_camera(camera_controller, requested_fps: float,
+                        default_min: int = PROTOCOL_FPS_MIN,
+                        default_max: int = PROTOCOL_FPS_MAX) -> int:
+    """
+    基于相机能力范围对目标帧率做动态裁剪。
+
+    Args:
+        camera_controller: 相机控制器（可为None）
+        requested_fps: 请求帧率
+        default_min: 默认最小帧率
+        default_max: 默认最大帧率（协议上限）
+
+    Returns:
+        int: 裁剪后的帧率
+    """
+    min_fps = float(max(PROTOCOL_FPS_MIN, default_min))
+    max_fps = float(max(min_fps, default_max))
+
+    if camera_controller and hasattr(camera_controller, "get_frame_rate_range"):
+        try:
+            cam_min, cam_max = camera_controller.get_frame_rate_range()
+            if cam_max > 0 and cam_max >= cam_min:
+                if cam_min > 0:
+                    min_fps = max(min_fps, float(cam_min))
+                max_fps = min(max_fps, float(cam_max))
+                if max_fps < min_fps:
+                    max_fps = min_fps
+        except Exception as e:
+            logger.warning(f"读取相机帧率范围失败，使用默认范围: {e}")
+
+    requested = float(requested_fps)
+    clamped = max(min_fps, min(max_fps, requested))
+    if clamped != requested:
+        logger.warning(f"请求帧率{requested}超出范围[{min_fps:.2f}, {max_fps:.2f}]，自动调整为{clamped:.2f}")
+
+    return max(PROTOCOL_FPS_MIN, int(clamped))
 
 
 class ImageAcquisition:
@@ -230,7 +272,7 @@ class ImageAcquisition:
         启动连续采集
 
         Args:
-            fps: 目标帧率（1-30）
+            fps: 目标帧率（最终按相机能力范围裁剪）
             callback: 帧回调函数，参数为(图像数组, 帧序号)
             mode: 采集模式
             duration: 录像时长（秒），0表示手动停止
@@ -253,8 +295,8 @@ class ImageAcquisition:
                 self._report_error(ErrorCode.CAMERA_NOT_CONNECTED, "相机未连接")
                 return False, ErrorCode.CAMERA_NOT_CONNECTED
 
-            #验证帧率范围
-            fps = max(1, min(30, fps))
+            #按相机能力范围动态裁剪帧率
+            fps = clamp_fps_to_camera(self._camera, fps)
 
             #获取分辨率
             resolution = self.RESOLUTION_MAP.get(resolution_index, (1920, 1080))
@@ -536,7 +578,7 @@ class PreviewAcquisition:
     预览采集器
 
     专门用于实时预览功能，支持：
-    - 帧率控制（5-30fps）
+    - 帧率控制（按相机能力动态裁剪）
     - 分辨率缩放
     - JPEG编码
     - 异步帧推送
@@ -658,7 +700,7 @@ class PreviewAcquisition:
 
         Args:
             resolution_index: 分辨率索引（0=5472x3648 ... 6=640x480）
-            fps: 帧率（5-30）
+            fps: 帧率（最终按相机能力范围裁剪）
 
         Returns:
             Tuple[bool, Optional[int]]: (是否成功, 错误码或None)
@@ -679,7 +721,8 @@ class PreviewAcquisition:
                 logger.warning(f"无效的分辨率索引: {resolution_index}，使用默认值0")
                 resolution_index = 0
 
-            fps = max(5, min(30, fps))  #限制帧率范围
+            #按相机能力范围动态裁剪帧率
+            fps = clamp_fps_to_camera(self._camera, fps)
 
             #获取分辨率
             width, height = PREVIEW_RESOLUTIONS[resolution_index]

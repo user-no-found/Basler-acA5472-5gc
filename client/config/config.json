@@ -23,7 +23,7 @@
     "default_resolution": [1920, 1080],
     "default_fps": 10,
     "jpeg_quality": 80,
-    "max_fps": 30
+    "max_fps": 255
   },
   "video": {
     "codec": "H264",

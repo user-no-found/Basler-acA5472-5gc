@@ -38,9 +38,10 @@ RESOLUTION_OPTIONS = [
     ("640x480", 6, 640, 480),
 ]
 
-#帧率选项
-RECORD_FPS_OPTIONS = list(range(1, 31))  #1-30
-PREVIEW_FPS_OPTIONS = list(range(5, 31))  #5-30
+#协议中录像/预览帧率为1字节
+FPS_MIN = 1
+FPS_MAX = 255
+FPS_OPTIONS = [str(i) for i in range(FPS_MIN, FPS_MAX + 1)]
 
 #像素格式选项
 PIXEL_FORMAT_OPTIONS = [
@@ -71,6 +72,8 @@ class ControlPanel(ttk.Frame):
         self._is_previewing = False
         self._is_continuous = False
         self._last_capture_file = ""
+        self._fps_min = FPS_MIN
+        self._fps_max = FPS_MAX
 
         #创建界面
         self._create_ui()
@@ -166,7 +169,7 @@ class ControlPanel(ttk.Frame):
         self.record_fps_combo = ttk.Combobox(
             fps_frame,
             textvariable=self.record_fps_var,
-            values=RECORD_FPS_OPTIONS,
+            values=FPS_OPTIONS,
             state="readonly",
             width=6
         )
@@ -220,7 +223,7 @@ class ControlPanel(ttk.Frame):
         self.preview_fps_combo = ttk.Combobox(
             fps_frame,
             textvariable=self.preview_fps_var,
-            values=PREVIEW_FPS_OPTIONS,
+            values=FPS_OPTIONS,
             state="readonly",
             width=6
         )
@@ -351,8 +354,8 @@ class ControlPanel(ttk.Frame):
         self.fps_spinbox = ttk.Spinbox(
             fps_frame,
             textvariable=self.fps_var,
-            from_=1,
-            to=30,
+            from_=self._fps_min,
+            to=self._fps_max,
             width=8,
             state=tk.DISABLED
         )
@@ -478,6 +481,10 @@ class ControlPanel(ttk.Frame):
         logger.warning(f"{field_name}: {msg}")
         messagebox.showwarning("输入验证警告", f"{field_name}: {msg}")
 
+    def _clamp_fps(self, fps: float) -> float:
+        """按当前帧率范围裁剪输入值"""
+        return max(float(self._fps_min), min(float(self._fps_max), float(fps)))
+
     def _on_record_start(self):
         """开始录像按钮点击"""
         duration_str = self.record_duration_var.get()
@@ -494,7 +501,7 @@ class ControlPanel(ttk.Frame):
         fps_str = self.record_fps_var.get()
         try:
             fps = int(fps_str)
-            fps = max(1, min(30, fps))
+            fps = int(self._clamp_fps(fps))
         except ValueError:
             fps = 5
             self._show_input_warning("录像帧率", fps_str, fps)
@@ -514,7 +521,7 @@ class ControlPanel(ttk.Frame):
         fps_str = self.preview_fps_var.get()
         try:
             fps = int(fps_str)
-            fps = max(5, min(30, fps))
+            fps = int(self._clamp_fps(fps))
         except ValueError:
             fps = 10
             self._show_input_warning("预览帧率", fps_str, fps)
@@ -576,7 +583,7 @@ class ControlPanel(ttk.Frame):
         fps_str = self.fps_var.get()
         try:
             fps_value = float(fps_str)
-            fps_value = max(1.0, min(30.0, fps_value))
+            fps_value = self._clamp_fps(fps_value)
         except ValueError:
             fps_value = 30.0
             self._show_input_warning("帧率", fps_str, fps_value)
