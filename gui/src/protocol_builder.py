@@ -406,6 +406,37 @@ def parse_ack_failed(data: bytes) -> Optional[Tuple[int, int]]:
     return (cmd, error_code)
 
 
+def parse_ack_failed_detail(data: bytes) -> Optional[Tuple[int, int, str]]:
+    """
+    解析操作失败响应（含可选错误详情）
+
+    数据格式:
+    - 基础: [原命令1字节][错误码2字节]
+    - 可选: [详情长度1字节][详情UTF-8字节]
+
+    Args:
+        data: 数据段
+
+    Returns:
+        (原命令码, 错误码, 错误详情)
+    """
+    if len(data) < 3:
+        return None
+
+    cmd = data[0]
+    error_code = struct.unpack('>H', data[1:3])[0]
+    detail = ""
+
+    if len(data) >= 4:
+        detail_len = data[3]
+        detail_start = 4
+        detail_end = detail_start + detail_len
+        if detail_len > 0 and len(data) >= detail_end:
+            detail = data[detail_start:detail_end].decode('utf-8', errors='ignore').strip()
+
+    return (cmd, error_code, detail)
+
+
 def parse_preview_frame(data: bytes) -> Optional[Tuple[int, bytes]]:
     """
     解析预览帧数据

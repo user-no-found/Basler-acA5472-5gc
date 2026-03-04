@@ -272,6 +272,46 @@ class TCPServer:
             fps = self.PROTOCOL_FPS_MIN
         return fps
 
+    @staticmethod
+    def _sanitize_error_detail(error: Exception, max_len: int = 200) -> str:
+        """
+        清洗异常文本，避免过长或包含换行。
+        """
+        detail = str(error).strip().replace("\r", " ").replace("\n", " ")
+        detail = " ".join(detail.split())
+        if not detail:
+            detail = error.__class__.__name__
+        if len(detail) > max_len:
+            detail = detail[:max_len]
+        return detail
+
+    @staticmethod
+    def _infer_error_code_from_detail(detail: str, default_code: int = ErrorCode.UNKNOWN_ERROR) -> int:
+        """
+        根据异常摘要推断更具体的错误码。
+        """
+        text = detail.lower()
+        if "node not existing" in text or "acquisitionframerate" in text or "setvalue" in text:
+            return ErrorCode.CAMERA_PARAM_FAILED
+        if "openh264" in text or "videowriter" in text or "ffmpeg" in text:
+            return ErrorCode.VIDEO_WRITER_INIT_FAILED
+        if "disk" in text or "space" in text or "no space" in text:
+            return ErrorCode.DISK_SPACE_LOW
+        if "permission" in text or "access denied" in text:
+            return ErrorCode.WRITE_PERMISSION_DENIED
+        if "timeout" in text:
+            return ErrorCode.CAMERA_GRAB_TIMEOUT
+        return default_code
+
+    def _build_exception_error_response(self, frame_cmd: int, error: Exception,
+                                        default_code: int = ErrorCode.UNKNOWN_ERROR) -> bytes:
+        """
+        构建带异常详情的错误响应，优先返回可推断的具体错误码。
+        """
+        detail = self._sanitize_error_detail(error)
+        code = self._infer_error_code_from_detail(detail, default_code=default_code)
+        return ProtocolBuilder.build_error_response(frame_cmd, code, detail)
+
     def register_handler(self, cmd: int, handler: CommandHandler):
         """
         注册命令处理器
@@ -1281,7 +1321,7 @@ class TCPServer:
         if self._image_processor is None:
             logger.warning("拍照失败: 图像处理器未初始化")
             return ProtocolBuilder.build_error_response(
-                frame.command, ErrorCode.UNKNOWN_ERROR
+                frame.command, ErrorCode.CAMERA_INIT_FAILED, "图像处理器未初始化"
             )
 
         #检查状态冲突
@@ -1317,8 +1357,8 @@ class TCPServer:
 
         except Exception as e:
             logger.error(f"拍照异常: {e}")
-            return ProtocolBuilder.build_error_response(
-                frame.command, ErrorCode.UNKNOWN_ERROR
+            return self._build_exception_error_response(
+                frame.command, e, default_code=ErrorCode.UNKNOWN_ERROR
             )
 
     #========== 录像控制处理器 ==========
@@ -1351,13 +1391,13 @@ class TCPServer:
         if self._image_processor is None:
             logger.warning("开始录像失败: 图像处理器未初始化")
             return ProtocolBuilder.build_error_response(
-                frame.command, ErrorCode.UNKNOWN_ERROR
+                frame.command, ErrorCode.CAMERA_INIT_FAILED, "图像处理器未初始化"
             )
 
         if self._image_acquisition is None:
             logger.warning("开始录像失败: 图像采集器未初始化")
             return ProtocolBuilder.build_error_response(
-                frame.command, ErrorCode.UNKNOWN_ERROR
+                frame.command, ErrorCode.CAMERA_INIT_FAILED, "图像采集器未初始化"
             )
 
         #检查状态冲突
@@ -1479,8 +1519,8 @@ class TCPServer:
             #清理资源
             if self._image_processor and self._image_processor.is_video_writing:
                 self._image_processor.close_video_writer()
-            return ProtocolBuilder.build_error_response(
-                frame.command, ErrorCode.UNKNOWN_ERROR
+            return self._build_exception_error_response(
+                frame.command, e, default_code=ErrorCode.UNKNOWN_ERROR
             )
 
     async def _handle_record_stop(self, client: ClientInfo, frame: ProtocolFrame) -> Optional[bytes]:
@@ -1516,8 +1556,8 @@ class TCPServer:
 
         except Exception as e:
             logger.error(f"停止录像异常: {e}")
-            return ProtocolBuilder.build_error_response(
-                frame.command, ErrorCode.UNKNOWN_ERROR
+            return self._build_exception_error_response(
+                frame.command, e, default_code=ErrorCode.UNKNOWN_ERROR
             )
 
     async def _on_recording_complete(self):
@@ -1578,7 +1618,7 @@ class TCPServer:
         if self._preview_acquisition is None:
             logger.warning("开启预览失败: 预览采集器未初始化")
             return ProtocolBuilder.build_error_response(
-                frame.command, ErrorCode.UNKNOWN_ERROR
+                frame.command, ErrorCode.CAMERA_INIT_FAILED, "预览采集器未初始化"
             )
 
         #检查状态冲突
@@ -1646,8 +1686,8 @@ class TCPServer:
 
         except Exception as e:
             logger.error(f"开启预览异常: {e}")
-            return ProtocolBuilder.build_error_response(
-                frame.command, ErrorCode.UNKNOWN_ERROR
+            return self._build_exception_error_response(
+                frame.command, e, default_code=ErrorCode.UNKNOWN_ERROR
             )
 
     async def _handle_preview_stop(self, client: ClientInfo, frame: ProtocolFrame) -> Optional[bytes]:
@@ -1690,8 +1730,8 @@ class TCPServer:
             logger.error(f"停止预览异常: {e}")
             #即使异常也尝试更新状态
             self._is_previewing = False
-            return ProtocolBuilder.build_error_response(
-                frame.command, ErrorCode.UNKNOWN_ERROR
+            return self._build_exception_error_response(
+                frame.command, e, default_code=ErrorCode.UNKNOWN_ERROR
             )
 
     def _encode_preview_jpeg(self, image, resolution: tuple) -> Optional[bytes]:

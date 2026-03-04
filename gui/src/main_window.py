@@ -28,6 +28,7 @@ from loguru import logger
 from tcp_client import TcpClient, ConnectionState
 from protocol_builder import (
     Command, parse_ack_success, parse_ack_failed,
+    parse_ack_failed_detail,
     build_capture, build_preview_start, build_preview_stop,
     build_record_start, build_record_stop,
     build_query_status, build_query_params
@@ -376,15 +377,26 @@ class MainWindow:
                     self._log_with_level(f"操作成功: 命令0x{orig_cmd:02X}", "success")
 
             elif cmd == Command.ACK_FAILED:
-                result = parse_ack_failed(data)
+                result = parse_ack_failed_detail(data)
                 if result:
-                    orig_cmd, error_code = result
+                    orig_cmd, error_code, error_detail = result
                     self._last_error_code = error_code
                     error_desc = get_error_description(error_code)
-                    self._log_with_level(
-                        f"操作失败: 命令0x{orig_cmd:02X}, {error_desc} (0x{error_code:04X})",
-                        "error"
-                    )
+                    if error_detail:
+                        self._log_with_level(
+                            f"操作失败: 命令0x{orig_cmd:02X}, {error_desc} (0x{error_code:04X})，原因: {error_detail}",
+                            "error"
+                        )
+                    else:
+                        # 兼容旧协议（仅原命令+错误码）
+                        fallback = parse_ack_failed(data)
+                        if fallback is not None:
+                            orig_cmd, error_code = fallback
+                            error_desc = get_error_description(error_code)
+                        self._log_with_level(
+                            f"操作失败: 命令0x{orig_cmd:02X}, {error_desc} (0x{error_code:04X})",
+                            "error"
+                        )
 
             elif cmd == Command.STATUS_REPORT:
                 if len(data) > 0 and hasattr(self, 'status_monitor'):

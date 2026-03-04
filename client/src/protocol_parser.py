@@ -245,18 +245,24 @@ class ProtocolBuilder:
         )
 
     @staticmethod
-    def build_error_response(original_cmd: int, error_code: int) -> bytes:
+    def build_error_response(original_cmd: int, error_code: int, error_detail: str = "") -> bytes:
         """
         构建错误响应帧
 
         Args:
             original_cmd: 原始命令码
             error_code: 错误码
+            error_detail: 错误详情（可选，UTF-8，最长255字节）
 
         Returns:
             bytes: 错误响应帧
         """
         data = bytes([original_cmd]) + struct.pack('>H', error_code)
+        if error_detail:
+            detail_bytes = error_detail.encode('utf-8', errors='ignore')
+            if len(detail_bytes) > 255:
+                detail_bytes = detail_bytes[:255]
+            data += bytes([len(detail_bytes)]) + detail_bytes
         return ProtocolBuilder.build_frame(CommandCode.RESPONSE_FAILED, data)
 
     @staticmethod
