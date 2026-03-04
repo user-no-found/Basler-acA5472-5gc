@@ -900,6 +900,247 @@ class CameraController:
                 self._report_error(ErrorCode.CAMERA_PARAM_FAILED, error_msg)
                 return False, ErrorCode.CAMERA_PARAM_FAILED
 
+    def _get_first_available_node(self, *node_names):
+        """
+        获取首个可用节点
+
+        Args:
+            node_names: 节点名候选列表
+
+        Returns:
+            Tuple[Optional[Any], str]: (节点对象, 命中节点名)
+        """
+        if self._camera is None:
+            return None, ""
+
+        for node_name in node_names:
+            if not node_name:
+                continue
+            if hasattr(self._camera, node_name):
+                try:
+                    return getattr(self._camera, node_name), node_name
+                except Exception:
+                    continue
+
+        return None, ""
+
+    def _set_enum_node(self, node, candidates: List[str]) -> Optional[str]:
+        """
+        按候选值设置枚举节点
+
+        Args:
+            node: pylon枚举节点
+            candidates: 目标枚举值候选（按优先级）
+
+        Returns:
+            Optional[str]: 实际设置成功的枚举值；失败返回None
+        """
+        symbolics: List[str] = []
+        try:
+            symbolics = list(node.Symbolics)
+        except Exception:
+            symbolics = []
+
+        for value in candidates:
+            if not value:
+                continue
+            if symbolics and value not in symbolics:
+                continue
+            try:
+                node.SetValue(value)
+                return value
+            except Exception:
+                continue
+
+        return None
+
+    def _set_numeric_node(self, node, value: float) -> Tuple[bool, float]:
+        """
+        设置数值节点（自动按范围裁剪）
+
+        Args:
+            node: pylon数值节点
+            value: 目标值
+
+        Returns:
+            Tuple[bool, float]: (是否成功, 实际尝试值)
+        """
+        target = float(value)
+        try:
+            node_min = float(node.Min)
+            node_max = float(node.Max)
+            target = max(node_min, min(node_max, target))
+        except Exception:
+            pass
+
+        # 先尝试整数，再尝试浮点，兼容不同节点类型
+        for cast in (lambda v: int(round(v)), float):
+            try:
+                node.SetValue(cast(target))
+                return True, target
+            except Exception:
+                continue
+
+        return False, target
+
+    def _set_user_output(self, enabled: bool) -> bool:
+        """
+        设置UserOutput1电平（作为LineSource降级兜底）
+
+        Args:
+            enabled: True=高电平，False=低电平
+
+        Returns:
+            bool: 是否设置成功
+        """
+        selector_node, _ = self._get_first_available_node("UserOutputSelector")
+        value_node, _ = self._get_first_available_node("UserOutputValue", "UserOutputValueAll")
+
+        if selector_node:
+            self._set_enum_node(selector_node, ["UserOutput1", "UserOutput"])
+
+        if value_node is None:
+            return False
+
+        try:
+            value_node.SetValue(bool(enabled))
+            return True
+        except Exception:
+            return False
+
+    def set_flash_l2_timer(self, enable: bool, delay_us: int, duration_us: int,
+                           interval_us: int = 0) -> Tuple[bool, Optional[int]]:
+        """
+        设置闪光灯输出（Line2 + TimerActive）
+
+        Args:
+            enable: 是否启用闪光
+            delay_us: 延时（微秒）
+            duration_us: 脉宽（微秒）
+            interval_us: 间隔（微秒，机型不支持时降级忽略）
+
+        Returns:
+            Tuple[bool, Optional[int]]: (是否设置成功, 错误码或None)
+        """
+        with self._lock:
+            if not self.is_connected or self._camera is None:
+                error_msg = "相机未连接，无法设置闪光灯"
+                logger.error(error_msg)
+                self._report_error(ErrorCode.CAMERA_NOT_CONNECTED, error_msg)
+                return False, ErrorCode.CAMERA_NOT_CONNECTED
+
+            delay_us = max(0, int(delay_us))
+            duration_us = max(1, int(duration_us))
+            interval_us = max(0, int(interval_us))
+
+            try:
+                line_selector_node, _ = self._get_first_available_node("LineSelector")
+                line_mode_node, _ = self._get_first_available_node("LineMode")
+                line_source_node, _ = self._get_first_available_node("LineSource")
+
+                if line_selector_node:
+                    selected_line = self._set_enum_node(line_selector_node, ["Line2"])
+                    if selected_line is None:
+                        error_msg = "相机不支持Line2，无法配置闪光输出"
+                        logger.error(error_msg)
+                        self._report_error(ErrorCode.CAMERA_PARAM_FAILED, error_msg)
+                        return False, ErrorCode.CAMERA_PARAM_FAILED
+
+                if line_mode_node:
+                    self._set_enum_node(line_mode_node, ["Output"])
+
+                if not enable:
+                    if line_source_node:
+                        source = self._set_enum_node(line_source_node, ["Off", "UserOutput1"])
+                        if source == "UserOutput1":
+                            self._set_user_output(False)
+                    logger.info("闪光灯已关闭（Line2输出禁用）")
+                    return True, None
+
+                timer_selector_node, _ = self._get_first_available_node("TimerSelector")
+                trigger_source_node, _ = self._get_first_available_node("TimerTriggerSource")
+                timer_delay_node, timer_delay_name = self._get_first_available_node(
+                    "TimerDelay", "TimerDelayAbs", "BslTimerDelay"
+                )
+                timer_duration_node, timer_duration_name = self._get_first_available_node(
+                    "TimerDuration", "TimerDurationAbs", "BslTimerDuration"
+                )
+
+                if timer_selector_node:
+                    self._set_enum_node(timer_selector_node, ["Timer1", "Timer"])
+
+                if timer_delay_node is None or timer_duration_node is None:
+                    error_msg = "相机缺少TimerDelay/TimerDuration节点，无法配置闪光脉冲"
+                    logger.error(error_msg)
+                    self._report_error(ErrorCode.CAMERA_PARAM_FAILED, error_msg)
+                    return False, ErrorCode.CAMERA_PARAM_FAILED
+
+                delay_ok, real_delay = self._set_numeric_node(timer_delay_node, delay_us)
+                duration_ok, real_duration = self._set_numeric_node(timer_duration_node, duration_us)
+                if not delay_ok or not duration_ok:
+                    error_msg = "设置TimerDelay/TimerDuration失败"
+                    logger.error(error_msg)
+                    self._report_error(ErrorCode.CAMERA_PARAM_FAILED, error_msg)
+                    return False, ErrorCode.CAMERA_PARAM_FAILED
+
+                interval_applied = False
+                if interval_us > 0:
+                    periodic_selector_node, _ = self._get_first_available_node("PeriodicSignalSelector")
+                    periodic_period_node, _ = self._get_first_available_node(
+                        "PeriodicSignalPeriod", "BslPeriodicSignalPeriod"
+                    )
+                    if periodic_selector_node and periodic_period_node and trigger_source_node:
+                        selected_periodic = self._set_enum_node(periodic_selector_node, ["PeriodicSignal1"])
+                        if selected_periodic is not None:
+                            period_ok, _ = self._set_numeric_node(periodic_period_node, interval_us)
+                            if period_ok:
+                                selected_trigger = self._set_enum_node(
+                                    trigger_source_node, ["PeriodicSignal1", "PeriodicSignal"]
+                                )
+                                interval_applied = selected_trigger is not None
+
+                if trigger_source_node and not interval_applied:
+                    self._set_enum_node(trigger_source_node, ["ExposureStart", "FrameStart", "AcquisitionStart"])
+
+                if line_source_node:
+                    line_source = self._set_enum_node(line_source_node, ["Timer1Active", "TimerActive"])
+                    if line_source is None:
+                        fallback_source = self._set_enum_node(line_source_node, ["UserOutput1"])
+                        if fallback_source == "UserOutput1":
+                            self._set_user_output(True)
+                        else:
+                            error_msg = "相机不支持TimerActive/Timer1Active，无法输出闪光信号"
+                            logger.error(error_msg)
+                            self._report_error(ErrorCode.CAMERA_PARAM_FAILED, error_msg)
+                            return False, ErrorCode.CAMERA_PARAM_FAILED
+                else:
+                    error_msg = "相机缺少LineSource节点，无法配置闪光输出"
+                    logger.error(error_msg)
+                    self._report_error(ErrorCode.CAMERA_PARAM_FAILED, error_msg)
+                    return False, ErrorCode.CAMERA_PARAM_FAILED
+
+                if interval_us > 0 and not interval_applied:
+                    logger.warning("当前机型未提供PeriodicSignal节点，间隔参数已忽略，仅按延时/脉宽生效")
+
+                logger.info(
+                    f"闪光灯配置完成: enable={enable}, delay={real_delay:.1f}us({timer_delay_name}), "
+                    f"duration={real_duration:.1f}us({timer_duration_name}), interval={interval_us}us"
+                )
+                return True, None
+
+            except pylon.RuntimeException as e:
+                error_msg = f"设置闪光灯失败（pypylon异常）: {e}"
+                logger.error(error_msg)
+                self._report_error(ErrorCode.CAMERA_PARAM_FAILED, error_msg)
+                if not self._check_connection():
+                    self._handle_disconnection()
+                return False, ErrorCode.CAMERA_PARAM_FAILED
+            except Exception as e:
+                error_msg = f"设置闪光灯失败: {e}"
+                logger.error(error_msg)
+                self._report_error(ErrorCode.CAMERA_PARAM_FAILED, error_msg)
+                return False, ErrorCode.CAMERA_PARAM_FAILED
+
     #========== 图像采集 ==========
 
     def grab_single(self) -> Tuple[Optional[np.ndarray], Optional[int]]:

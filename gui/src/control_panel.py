@@ -22,6 +22,7 @@ from protocol_builder import (
     build_set_exposure, build_set_gain, build_set_white_balance,
     build_set_resolution,
     build_set_gain_auto, build_set_frame_rate, build_set_pixel_format,
+    build_set_flash,
     build_query_status, build_query_params, build_query_resolutions
 )
 from error_codes import get_error_message
@@ -91,6 +92,9 @@ class ControlPanel(ttk.Frame):
 
         #参数设置
         self._create_params_section()
+
+        #闪光灯控制
+        self._create_flash_section()
 
         #查询功能
         self._create_query_section()
@@ -193,6 +197,12 @@ class ControlPanel(ttk.Frame):
         ttk.Label(status_frame, text="状态:").pack(side=tk.LEFT)
         self.record_status_label = ttk.Label(status_frame, text="未录像", foreground="gray")
         self.record_status_label.pack(side=tk.LEFT, padx=(5, 0))
+
+        rec_fps_frame = ttk.Frame(frame)
+        rec_fps_frame.pack(fill=tk.X, pady=2)
+        ttk.Label(rec_fps_frame, text="REC FPS:").pack(side=tk.LEFT)
+        self.record_live_fps_label = ttk.Label(rec_fps_frame, text="--", foreground="gray")
+        self.record_live_fps_label.pack(side=tk.LEFT, padx=(5, 0))
 
     def _create_preview_section(self):
         """创建预览控制区域"""
@@ -398,6 +408,46 @@ class ControlPanel(ttk.Frame):
         self.query_res_btn = ttk.Button(frame, text="查询分辨率列表", command=self._on_query_resolutions)
         self.query_res_btn.pack(fill=tk.X, pady=2)
 
+    def _create_flash_section(self):
+        """创建闪光灯控制区域"""
+        frame = ttk.LabelFrame(self, text="闪光灯控制（L2 + Timer）", padding="5")
+        frame.pack(fill=tk.X, pady=(0, 5))
+
+        enable_frame = ttk.Frame(frame)
+        enable_frame.pack(fill=tk.X, pady=2)
+        self.flash_enable_var = tk.BooleanVar(value=False)
+        self.flash_enable_check = ttk.Checkbutton(
+            enable_frame,
+            text="启用闪光输出",
+            variable=self.flash_enable_var
+        )
+        self.flash_enable_check.pack(side=tk.LEFT)
+
+        delay_frame = ttk.Frame(frame)
+        delay_frame.pack(fill=tk.X, pady=2)
+        ttk.Label(delay_frame, text="延时(us):").pack(side=tk.LEFT)
+        self.flash_delay_var = tk.StringVar(value="0")
+        self.flash_delay_entry = ttk.Entry(delay_frame, textvariable=self.flash_delay_var, width=10)
+        self.flash_delay_entry.pack(side=tk.LEFT, padx=(5, 0))
+
+        duration_frame = ttk.Frame(frame)
+        duration_frame.pack(fill=tk.X, pady=2)
+        ttk.Label(duration_frame, text="脉宽(us):").pack(side=tk.LEFT)
+        self.flash_duration_var = tk.StringVar(value="100")
+        self.flash_duration_entry = ttk.Entry(duration_frame, textvariable=self.flash_duration_var, width=10)
+        self.flash_duration_entry.pack(side=tk.LEFT, padx=(5, 0))
+
+        interval_frame = ttk.Frame(frame)
+        interval_frame.pack(fill=tk.X, pady=2)
+        ttk.Label(interval_frame, text="间隔(us):").pack(side=tk.LEFT)
+        self.flash_interval_var = tk.StringVar(value="0")
+        self.flash_interval_entry = ttk.Entry(interval_frame, textvariable=self.flash_interval_var, width=10)
+        self.flash_interval_entry.pack(side=tk.LEFT, padx=(5, 0))
+        ttk.Label(interval_frame, text="(不支持时自动忽略)", foreground="gray").pack(side=tk.LEFT, padx=(5, 0))
+
+        self.apply_flash_btn = ttk.Button(frame, text="应用闪光灯设置", command=self._on_apply_flash)
+        self.apply_flash_btn.pack(fill=tk.X, pady=(5, 2))
+
     def _get_resolution_index(self, res_str: str) -> int:
         """获取分辨率索引"""
         for name, index, w, h in RESOLUTION_OPTIONS:
@@ -598,6 +648,45 @@ class ControlPanel(ttk.Frame):
         logger.info(f"发送像素格式设置: format_index={pixel_format_index}")
         self._send(build_set_pixel_format(format_index=pixel_format_index))
 
+    def _on_apply_flash(self):
+        """应用闪光灯参数"""
+        enable = self.flash_enable_var.get()
+
+        delay_str = self.flash_delay_var.get().strip()
+        duration_str = self.flash_duration_var.get().strip()
+        interval_str = self.flash_interval_var.get().strip()
+
+        try:
+            delay_us = max(0, int(delay_str))
+        except ValueError:
+            delay_us = 0
+            self._show_input_warning("闪光延时(us)", delay_str, delay_us)
+
+        try:
+            duration_us = max(1, int(duration_str))
+        except ValueError:
+            duration_us = 100
+            self._show_input_warning("闪光脉宽(us)", duration_str, duration_us)
+
+        try:
+            interval_us = max(0, int(interval_str))
+        except ValueError:
+            interval_us = 0
+            self._show_input_warning("闪光间隔(us)", interval_str, interval_us)
+
+        logger.info(
+            f"发送闪光灯设置: enable={enable}, delay={delay_us}us, "
+            f"duration={duration_us}us, interval={interval_us}us"
+        )
+        self._send(
+            build_set_flash(
+                enable=enable,
+                delay_us=delay_us,
+                duration_us=duration_us,
+                interval_us=interval_us
+            )
+        )
+
     def _on_query_status(self):
         """查询状态按钮点击"""
         logger.info("发送查询状态命令")
@@ -678,6 +767,13 @@ class ControlPanel(ttk.Frame):
         self.query_params_btn.config(state=state)
         self.query_res_btn.config(state=state)
 
+        #闪光灯
+        self.flash_enable_check.config(state=state)
+        self.flash_delay_entry.config(state=state)
+        self.flash_duration_entry.config(state=state)
+        self.flash_interval_entry.config(state=state)
+        self.apply_flash_btn.config(state=state)
+
     def set_recording_state(self, is_recording: bool):
         """
         设置录像状态
@@ -693,11 +789,13 @@ class ControlPanel(ttk.Frame):
             self.record_stop_btn.config(state=tk.NORMAL)
             #录像时禁用拍照
             self.capture_btn.config(state=tk.DISABLED)
+            self.record_live_fps_label.config(text="0.0", foreground="green")
         else:
             self.record_status_label.config(text="未录像", foreground="gray")
             self.record_start_btn.config(state=tk.NORMAL)
             self.record_stop_btn.config(state=tk.DISABLED)
             self.capture_btn.config(state=tk.NORMAL)
+            self.record_live_fps_label.config(text="--", foreground="gray")
 
     def set_preview_state(self, is_previewing: bool):
         """
@@ -751,6 +849,20 @@ class ControlPanel(ttk.Frame):
         """
         self._last_capture_file = filename
         self.capture_file_label.config(text=filename, foreground="blue")
+
+    def set_record_realtime_fps(self, fps: float):
+        """
+        更新录像实时帧率显示
+
+        Args:
+            fps: 实时帧率
+        """
+        if not self._is_recording:
+            self.record_live_fps_label.config(text="--", foreground="gray")
+            return
+
+        fps = max(0.0, float(fps))
+        self.record_live_fps_label.config(text=f"{fps:.1f}", foreground="green")
 
     def update_params(self, exposure_mode: int, exposure_value: int, gain: int, wb_mode: int,
                       width: Optional[int] = None, height: Optional[int] = None,

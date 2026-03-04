@@ -300,6 +300,14 @@ class ImageAcquisition:
 
             #获取分辨率
             resolution = self.RESOLUTION_MAP.get(resolution_index, (1920, 1080))
+            target_width, target_height = resolution
+
+            #将目标分辨率下发到相机ROI，避免仅软件缩放导致帧率无法提升
+            if hasattr(self._camera, "set_resolution"):
+                success, error_code = self._camera.set_resolution(target_width, target_height)
+                if not success:
+                    logger.error(f"设置录像采集分辨率失败: {target_width}x{target_height}")
+                    return False, error_code or ErrorCode.CAMERA_GRAB_TIMEOUT
 
             #配置采集参数
             self._config = AcquisitionConfig(
@@ -726,6 +734,13 @@ class PreviewAcquisition:
 
             #获取分辨率
             width, height = PREVIEW_RESOLUTIONS[resolution_index]
+
+            #将预览分辨率下发到相机ROI，确保采集链路真实降分辨率
+            if hasattr(self._camera, "set_resolution"):
+                success, error_code = self._camera.set_resolution(width, height)
+                if not success:
+                    logger.error(f"设置预览采集分辨率失败: {width}x{height}")
+                    return False, error_code or 0x0104
 
             #更新配置
             self._config.width = width

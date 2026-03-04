@@ -30,6 +30,14 @@ from collections import deque
 
 from loguru import logger
 
+try:
+    import cv2
+    OPENCV_AVAILABLE = True
+except ImportError:
+    cv2 = None
+    OPENCV_AVAILABLE = False
+    logger.warning("OpenCV未安装，录像实时预览回传功能不可用")
+
 from protocol_parser import (
     ProtocolParser,
     ProtocolBuilder,
@@ -93,6 +101,7 @@ class TCPServer:
     #协议中录像/预览帧率字段为1字节
     PROTOCOL_FPS_MIN = 1
     PROTOCOL_FPS_MAX = 255
+    RECORD_PREVIEW_JPEG_QUALITY = 80
 
     #========== 性能优化常量 ==========
     #发送缓冲区大小（64KB）
@@ -183,6 +192,7 @@ class TCPServer:
         self.register_handler(CommandCode.SET_GAIN_AUTO, self._handle_set_gain_auto)
         self.register_handler(CommandCode.SET_FRAME_RATE, self._handle_set_frame_rate)
         self.register_handler(CommandCode.SET_PIXEL_FORMAT, self._handle_set_pixel_format)
+        self.register_handler(CommandCode.SET_FLASH, self._handle_set_flash)
         #注册录像控制处理器
         self.register_handler(CommandCode.RECORD_START, self._handle_record_start)
         self.register_handler(CommandCode.RECORD_STOP, self._handle_record_stop)
@@ -860,6 +870,60 @@ class TCPServer:
                 frame.command, ErrorCode.CAMERA_PARAM_FAILED
             )
 
+    async def _handle_set_flash(self, client: ClientInfo, frame: ProtocolFrame) -> Optional[bytes]:
+        """
+        处理闪光灯设置命令(0x27)
+
+        数据格式: [启用1字节][延时4字节][脉宽4字节][间隔4字节]
+        - 启用: 0-关闭, 1-开启
+        - 延时/脉宽/间隔: 微秒，大端序无符号整数
+        """
+        if self._camera is None or not self._camera.is_connected:
+            logger.warning("设置闪光灯失败: 相机未连接")
+            return ProtocolBuilder.build_error_response(
+                frame.command, ErrorCode.CAMERA_NOT_CONNECTED
+            )
+
+        if len(frame.data) < 13:
+            logger.warning(f"设置闪光灯失败: 数据长度不足，期望13字节，实际{len(frame.data)}字节")
+            return ProtocolBuilder.build_error_response(
+                frame.command, ErrorCode.DATA_LENGTH_ERROR
+            )
+
+        if not hasattr(self._camera, "set_flash_l2_timer"):
+            logger.warning("设置闪光灯失败: 相机控制器未实现set_flash_l2_timer")
+            return ProtocolBuilder.build_error_response(
+                frame.command, ErrorCode.CAMERA_PARAM_FAILED
+            )
+
+        try:
+            enable = frame.data[0] == 1
+            delay_us = struct.unpack('>I', frame.data[1:5])[0]
+            duration_us = struct.unpack('>I', frame.data[5:9])[0]
+            interval_us = struct.unpack('>I', frame.data[9:13])[0]
+
+            logger.info(
+                f"设置闪光灯: enable={enable}, delay={delay_us}us, "
+                f"duration={duration_us}us, interval={interval_us}us"
+            )
+
+            success, error_code = self._camera.set_flash_l2_timer(
+                enable=enable,
+                delay_us=delay_us,
+                duration_us=duration_us,
+                interval_us=interval_us
+            )
+            if success:
+                return ProtocolBuilder.build_success_response(frame.command)
+            return ProtocolBuilder.build_error_response(
+                frame.command, error_code or ErrorCode.CAMERA_PARAM_FAILED
+            )
+        except Exception as e:
+            logger.error(f"设置闪光灯异常: {e}")
+            return ProtocolBuilder.build_error_response(
+                frame.command, ErrorCode.CAMERA_PARAM_FAILED
+            )
+
     async def _handle_set_resolution(self, client: ClientInfo, frame: ProtocolFrame) -> Optional[bytes]:
         """
         处理分辨率设置命令(0x23)
@@ -1317,6 +1381,9 @@ class TCPServer:
             )
 
         try:
+            #保存事件循环引用，供采集线程回调发送异步预览帧
+            self._event_loop = asyncio.get_event_loop()
+
             #解析数据
             duration = struct.unpack('>I', frame.data[0:4])[0]  #时长（秒），大端序
             resolution_index = frame.data[4]                     #分辨率索引
@@ -1347,11 +1414,14 @@ class TCPServer:
 
             #定义帧回调函数
             def on_frame(image, frame_num):
-                """帧回调：写入视频"""
+                """帧回调：写入视频并实时回传预览帧"""
                 if self._image_processor:
                     success, _ = self._image_processor.write_frame(image)
                     if not success:
                         logger.warning(f"写入视频帧失败: 帧号={frame_num}")
+
+                #录像时也实时回传GUI预览帧
+                self._send_record_preview_frame(image, frame_num, resolution)
 
             #定义完成回调函数
             def on_complete():
@@ -1589,7 +1659,63 @@ class TCPServer:
                 frame.command, ErrorCode.UNKNOWN_ERROR
             )
 
-    def _on_preview_frame(self, seq: int, jpeg_data: bytes) -> None:
+    def _encode_preview_jpeg(self, image, resolution: tuple) -> Optional[bytes]:
+        """
+        将采集图像编码为预览JPEG
+
+        Args:
+            image: 原始图像（numpy数组）
+            resolution: 目标尺寸(宽, 高)
+
+        Returns:
+            Optional[bytes]: JPEG字节；失败返回None
+        """
+        if not OPENCV_AVAILABLE:
+            return None
+
+        try:
+            frame = image
+
+            if len(frame.shape) == 2:
+                frame = cv2.cvtColor(frame, cv2.COLOR_GRAY2BGR)
+            elif len(frame.shape) == 3 and frame.shape[2] == 4:
+                frame = cv2.cvtColor(frame, cv2.COLOR_BGRA2BGR)
+
+            target_w, target_h = resolution
+            if frame.shape[1] != target_w or frame.shape[0] != target_h:
+                frame = cv2.resize(frame, (target_w, target_h), interpolation=cv2.INTER_LINEAR)
+
+            ok, encoded = cv2.imencode(
+                '.jpg',
+                frame,
+                [int(cv2.IMWRITE_JPEG_QUALITY), int(self.RECORD_PREVIEW_JPEG_QUALITY)]
+            )
+            if not ok:
+                return None
+            return encoded.tobytes()
+        except Exception as e:
+            logger.debug(f"录像预览JPEG编码失败: {e}")
+            return None
+
+    def _send_record_preview_frame(self, image, frame_num: int, resolution: tuple) -> None:
+        """
+        录像帧转预览JPEG并回传GUI
+
+        Args:
+            image: 原始图像（numpy数组）
+            frame_num: 帧号
+            resolution: 目标预览尺寸
+        """
+        if self._event_loop is None:
+            return
+
+        jpeg_data = self._encode_preview_jpeg(image, resolution)
+        if not jpeg_data:
+            return
+
+        self._on_preview_frame(frame_num, jpeg_data, allow_recording=True)
+
+    def _on_preview_frame(self, seq: int, jpeg_data: bytes, allow_recording: bool = False) -> None:
         """
         预览帧回调函数
 
@@ -1599,7 +1725,7 @@ class TCPServer:
             seq: 帧序号
             jpeg_data: JPEG图像数据
         """
-        if not self._is_previewing:
+        if not self._is_previewing and not allow_recording:
             return
 
         if self._event_loop is None:

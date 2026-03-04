@@ -55,6 +55,7 @@ class CommandCode(IntEnum):
     SET_GAIN_AUTO = 0x24           #设置自动增益
     SET_FRAME_RATE = 0x25          #设置帧率
     SET_PIXEL_FORMAT = 0x26        #设置像素格式
+    SET_FLASH = 0x27               #设置闪光灯（Line2 + Timer）
     QUERY_STATUS = 0x30            #查询状态
     QUERY_PARAMS = 0x31            #查询参数
     QUERY_RESOLUTIONS = 0x32       #查询支持的分辨率列表

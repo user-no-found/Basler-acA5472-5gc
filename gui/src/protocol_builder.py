@@ -46,6 +46,7 @@ class Command:
     SET_GAIN_AUTO = 0x24    #设置自动增益
     SET_FRAME_RATE = 0x25   #设置帧率
     SET_PIXEL_FORMAT = 0x26 #设置像素格式
+    SET_FLASH = 0x27        #设置闪光灯（Line2 + Timer）
     QUERY_STATUS = 0x30     #查询状态
     QUERY_PARAMS = 0x31     #查询参数
     QUERY_RESOLUTIONS = 0x32  #查询支持的分辨率列表
@@ -342,6 +343,29 @@ def build_set_pixel_format(format_index: int) -> bytes:
     """
     data = bytes([format_index])
     return build_frame(Command.SET_PIXEL_FORMAT, data)
+
+
+def build_set_flash(enable: bool, delay_us: int, duration_us: int, interval_us: int) -> bytes:
+    """
+    构建闪光灯设置命令帧
+
+    Args:
+        enable: 是否启用闪光输出
+        delay_us: 延时（微秒）
+        duration_us: 脉宽（微秒）
+        interval_us: 间隔（微秒，机型不支持时客户端降级忽略）
+
+    Returns:
+        命令帧
+    """
+    delay_us = max(0, int(delay_us))
+    duration_us = max(1, int(duration_us))
+    interval_us = max(0, int(interval_us))
+    data = bytes([1 if enable else 0])
+    data += struct.pack('>I', delay_us)
+    data += struct.pack('>I', duration_us)
+    data += struct.pack('>I', interval_us)
+    return build_frame(Command.SET_FLASH, data)
 
 
 def build_query_gain_auto() -> bytes:

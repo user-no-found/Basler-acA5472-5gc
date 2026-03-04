@@ -108,6 +108,7 @@ class MainWindow:
         #创建界面
         self._create_menu()
         self._create_ui()
+        self._schedule_record_fps_update()
 
         #应用配置到界面
         self._apply_settings()
@@ -252,6 +253,17 @@ class MainWindow:
         self.status_monitor = StatusMonitor(status_frame)
         self.status_monitor.pack(fill=tk.BOTH, expand=True)
 
+    def _schedule_record_fps_update(self):
+        """周期更新录像实时帧率显示"""
+        try:
+            if hasattr(self, 'control_panel') and hasattr(self, 'preview_widget'):
+                fps = self.preview_widget.get_fps()
+                self.control_panel.set_record_realtime_fps(fps)
+        except Exception as e:
+            logger.debug(f"更新REC FPS显示失败: {e}")
+        finally:
+            self.root.after(300, self._schedule_record_fps_update)
+
     def _update_status_indicator(self, color: str):
         """更新状态指示灯"""
         self.status_indicator.delete("all")
@@ -358,7 +370,9 @@ class MainWindow:
                         self.control_panel.set_recording_state(status.get('recording', False))
                         self.control_panel.set_preview_state(status.get('previewing', False))
                         self.control_panel.set_continuous_state(status.get('continuous', False))
-                        if not status.get('previewing', False) and hasattr(self, 'preview_widget'):
+                        if (not status.get('previewing', False)
+                                and not status.get('recording', False)
+                                and hasattr(self, 'preview_widget')):
                             self.preview_widget.clear()
 
             elif cmd == Command.PARAMS_REPORT:
