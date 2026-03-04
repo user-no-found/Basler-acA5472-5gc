@@ -1251,15 +1251,25 @@ class CameraController:
                 return None
 
             try:
+                def _read_node_value(default, *node_names):
+                    node, node_name = self._get_first_available_node(*node_names)
+                    if node is None:
+                        return default
+                    try:
+                        return node.Value
+                    except Exception as e:
+                        logger.debug(f"读取参数节点失败({node_name}): {e}")
+                        return default
+
                 params = CameraParameters(
-                    exposure_time=self._camera.ExposureTime.Value,
-                    gain=self._camera.Gain.Value,
-                    width=self._camera.Width.Value,
-                    height=self._camera.Height.Value,
-                    offset_x=self._camera.OffsetX.Value,
-                    offset_y=self._camera.OffsetY.Value,
-                    exposure_mode=self._camera.ExposureAuto.Value if hasattr(self._camera, 'ExposureAuto') else "Unknown",
-                    white_balance_mode=self._camera.BalanceWhiteAuto.Value if hasattr(self._camera, 'BalanceWhiteAuto') else "Unknown"
+                    exposure_time=float(_read_node_value(10000.0, "ExposureTime", "ExposureTimeAbs")),
+                    gain=float(_read_node_value(1.0, "Gain", "GainRaw")),
+                    width=int(_read_node_value(1920, "Width")),
+                    height=int(_read_node_value(1080, "Height")),
+                    offset_x=int(_read_node_value(0, "OffsetX")),
+                    offset_y=int(_read_node_value(0, "OffsetY")),
+                    exposure_mode=str(_read_node_value("Unknown", "ExposureAuto")),
+                    white_balance_mode=str(_read_node_value("Unknown", "BalanceWhiteAuto", "BalanceWhiteAutoRaw"))
                 )
                 return params
 

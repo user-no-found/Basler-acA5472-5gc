@@ -1128,33 +1128,41 @@ class TCPServer:
 
             #尝试获取白平衡值（需要从相机直接读取）
             try:
-                if hasattr(self._camera, '_camera') and self._camera._camera:
-                    cam = self._camera._camera
-                    if hasattr(cam, 'BalanceRatioSelector'):
-                        #读取红色通道
-                        cam.BalanceRatioSelector.SetValue("Red")
-                        wb_r = int(cam.BalanceRatio.Value * 100)
-                        #读取蓝色通道
-                        cam.BalanceRatioSelector.SetValue("Blue")
-                        wb_b = int(cam.BalanceRatio.Value * 100)
+                selector_node = None
+                ratio_node = None
+                if hasattr(self._camera, "_get_first_available_node"):
+                    selector_node, _ = self._camera._get_first_available_node("BalanceRatioSelector")
+                    ratio_node, _ = self._camera._get_first_available_node("BalanceRatio")
+
+                if selector_node is not None and ratio_node is not None:
+                    #读取红色通道
+                    selector_node.SetValue("Red")
+                    wb_r = int(float(ratio_node.Value) * 100)
+                    #读取蓝色通道
+                    selector_node.SetValue("Blue")
+                    wb_b = int(float(ratio_node.Value) * 100)
             except Exception as e:
                 logger.debug(f"获取白平衡值失败: {e}")
 
         #打包数据（注意：曝光值用I是4字节无符号整数）
-        data = struct.pack(
-            '>BIHBHHHHHHI',
-            exposure_mode,     #曝光模式(1字节)
-            exposure_us,       #曝光值(4字节，大端序)
-            gain,              #增益(2字节，大端序)
-            wb_mode,           #白平衡模式(1字节)
-            wb_r,              #白平衡R(2字节)
-            wb_g,              #白平衡G(2字节)
-            wb_b,              #白平衡B(2字节)
-            width,             #分辨率宽(2字节)
-            height,            #分辨率高(2字节)
-            cam_fps_x100       #相机实际帧率*100(4字节)
-        )
-        return data
+        try:
+            data = struct.pack(
+                '>BIHBHHHHHI',
+                int(exposure_mode) & 0xFF,                        #曝光模式(1字节)
+                max(0, min(0xFFFFFFFF, int(exposure_us))),        #曝光值(4字节，大端序)
+                max(0, min(0xFFFF, int(gain))),                   #增益(2字节，大端序)
+                int(wb_mode) & 0xFF,                              #白平衡模式(1字节)
+                max(0, min(0xFFFF, int(wb_r))),                   #白平衡R(2字节)
+                max(0, min(0xFFFF, int(wb_g))),                   #白平衡G(2字节)
+                max(0, min(0xFFFF, int(wb_b))),                   #白平衡B(2字节)
+                max(0, min(0xFFFF, int(width))),                  #分辨率宽(2字节)
+                max(0, min(0xFFFF, int(height))),                 #分辨率高(2字节)
+                max(0, min(0xFFFFFFFF, int(cam_fps_x100)))        #相机实际帧率*100(4字节)
+            )
+            return data
+        except struct.error as e:
+            logger.error(f"构建参数数据打包失败，回退默认参数: {e}")
+            return struct.pack('>BIHBHHHHHI', 1, 10000, 100, 0, 100, 100, 100, 1920, 1080, 0)
 
     def _get_supported_resolutions(self) -> list:
         """
