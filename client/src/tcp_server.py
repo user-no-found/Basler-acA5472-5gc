@@ -162,6 +162,16 @@ class TCPServer:
         self._is_previewing = False   #正在预览
         self._is_continuous = False   #正在连续拍照
 
+        #闪光灯状态缓存
+        #保存用户最新配置；录像/预览期间仅缓存，退出后恢复
+        self._flash_user_config = {
+            "enable": False,
+            "delay_us": 0,
+            "duration_us": 100,
+            "interval_us": 0,
+        }
+        self._flash_forced_disabled = False
+
         #录像相关
         self._recording_task: Optional[asyncio.Task] = None
         self._event_loop: Optional[asyncio.AbstractEventLoop] = None
@@ -932,30 +942,35 @@ class TCPServer:
                 frame.command, ErrorCode.DATA_LENGTH_ERROR
             )
 
-        if not hasattr(self._camera, "set_flash_l2_timer"):
-            logger.warning("设置闪光灯失败: 相机控制器未实现set_flash_l2_timer")
-            return ProtocolBuilder.build_error_response(
-                frame.command, ErrorCode.CAMERA_PARAM_FAILED
-            )
-
         try:
             enable = frame.data[0] == 1
             delay_us = struct.unpack('>I', frame.data[1:5])[0]
             duration_us = struct.unpack('>I', frame.data[5:9])[0]
             interval_us = struct.unpack('>I', frame.data[9:13])[0]
 
+            # 先缓存用户配置。录像/预览期间只缓存，退出后恢复。
+            self._flash_user_config = {
+                "enable": bool(enable),
+                "delay_us": int(delay_us),
+                "duration_us": int(duration_us),
+                "interval_us": int(interval_us),
+            }
+
             logger.info(
                 f"设置闪光灯: enable={enable}, delay={delay_us}us, "
                 f"duration={duration_us}us, interval={interval_us}us"
             )
 
-            success, error_code = self._camera.set_flash_l2_timer(
-                enable=enable,
-                delay_us=delay_us,
-                duration_us=duration_us,
-                interval_us=interval_us
+            if self._is_streaming_active():
+                logger.info("当前处于录像/预览中，闪光灯配置已缓存，将在退出后恢复")
+                return ProtocolBuilder.build_success_response(frame.command)
+
+            success, error_code = self._apply_flash_config(
+                self._flash_user_config,
+                reason="用户主动设置闪光灯"
             )
             if success:
+                self._flash_forced_disabled = False
                 return ProtocolBuilder.build_success_response(frame.command)
             return ProtocolBuilder.build_error_response(
                 frame.command, error_code or ErrorCode.CAMERA_PARAM_FAILED
@@ -1198,6 +1213,75 @@ class TCPServer:
     def set_previewing(self, previewing: bool) -> None:
         """设置预览状态"""
         self._is_previewing = previewing
+
+    def _is_streaming_active(self) -> bool:
+        """当前是否处于录像或预览"""
+        return self._is_recording or self._is_previewing
+
+    def _apply_flash_config(self, config: dict, reason: str = "") -> tuple[bool, Optional[int]]:
+        """
+        下发闪光灯配置到相机
+
+        Args:
+            config: 闪光灯配置字典
+            reason: 日志用途
+
+        Returns:
+            tuple[bool, Optional[int]]: (是否成功, 错误码)
+        """
+        if self._camera is None or not self._camera.is_connected:
+            logger.warning(f"下发闪光灯配置失败（相机未连接）: {reason}")
+            return False, ErrorCode.CAMERA_NOT_CONNECTED
+
+        if not hasattr(self._camera, "set_flash_l2_timer"):
+            logger.warning(f"下发闪光灯配置失败（接口缺失）: {reason}")
+            return False, ErrorCode.CAMERA_PARAM_FAILED
+
+        try:
+            success, error_code = self._camera.set_flash_l2_timer(
+                enable=bool(config.get("enable", False)),
+                delay_us=max(0, int(config.get("delay_us", 0))),
+                duration_us=max(1, int(config.get("duration_us", 100))),
+                interval_us=max(0, int(config.get("interval_us", 0)))
+            )
+            if not success:
+                logger.warning(f"下发闪光灯配置失败: reason={reason}, code={error_code}")
+            return success, error_code
+        except Exception as e:
+            logger.error(f"下发闪光灯配置异常: reason={reason}, error={e}")
+            return False, ErrorCode.CAMERA_PARAM_FAILED
+
+    def _suspend_flash_for_streaming(self, scene: str) -> tuple[bool, Optional[int]]:
+        """
+        在录像/预览开始前强制关闭闪光灯
+        """
+        if self._flash_forced_disabled:
+            return True, None
+
+        disable_config = dict(self._flash_user_config)
+        disable_config["enable"] = False
+        success, error_code = self._apply_flash_config(disable_config, reason=f"{scene}开始前禁用闪光灯")
+        if success:
+            self._flash_forced_disabled = True
+        return success, error_code
+
+    def _restore_flash_after_streaming(self, scene: str) -> tuple[bool, Optional[int]]:
+        """
+        在录像/预览结束后恢复用户闪光灯配置
+        """
+        if self._is_streaming_active():
+            return True, None
+
+        if not self._flash_forced_disabled:
+            return True, None
+
+        success, error_code = self._apply_flash_config(
+            self._flash_user_config,
+            reason=f"{scene}结束后恢复闪光灯"
+        )
+        # 不论恢复是否成功，都清理运行期强制标记，避免后续状态卡死。
+        self._flash_forced_disabled = False
+        return success, error_code
 
     async def _send_to_client(self, client: ClientInfo, data: bytes):
         """
@@ -1474,6 +1558,14 @@ class TCPServer:
                         frame.command, fps_err or ErrorCode.CAMERA_PARAM_FAILED
                     )
 
+            # 录像期间强制关闭闪光灯，退出后自动恢复用户配置
+            flash_ok, flash_err = self._suspend_flash_for_streaming("录像")
+            if not flash_ok:
+                logger.warning("开始录像失败: 禁用闪光灯失败")
+                return ProtocolBuilder.build_error_response(
+                    frame.command, flash_err or ErrorCode.CAMERA_PARAM_FAILED
+                )
+
             #生成视频文件名
             video_filename = self._image_processor.generate_video_filename()
 
@@ -1527,6 +1619,9 @@ class TCPServer:
             if not success:
                 logger.error("启动连续采集失败")
                 self._image_processor.close_video_writer()
+                restore_ok, restore_err = self._restore_flash_after_streaming("录像")
+                if not restore_ok:
+                    logger.warning(f"录像启动失败后恢复闪光灯失败: 0x{(restore_err or ErrorCode.UNKNOWN_ERROR):04X}")
                 return ProtocolBuilder.build_error_response(
                     frame.command, ErrorCode.CAMERA_GRAB_TIMEOUT
                 )
@@ -1542,6 +1637,9 @@ class TCPServer:
             #清理资源
             if self._image_processor and self._image_processor.is_video_writing:
                 self._image_processor.close_video_writer()
+            restore_ok, restore_err = self._restore_flash_after_streaming("录像")
+            if not restore_ok:
+                logger.warning(f"录像异常后恢复闪光灯失败: 0x{(restore_err or ErrorCode.UNKNOWN_ERROR):04X}")
             return self._build_exception_error_response(
                 frame.command, e, default_code=ErrorCode.UNKNOWN_ERROR
             )
@@ -1611,6 +1709,9 @@ class TCPServer:
         finally:
             #更新状态
             self._is_recording = False
+            restore_ok, restore_err = self._restore_flash_after_streaming("录像")
+            if not restore_ok:
+                logger.warning(f"录像结束后恢复闪光灯失败: 0x{(restore_err or ErrorCode.UNKNOWN_ERROR):04X}")
 
     #========== 预览控制处理器 ==========
 
@@ -1689,6 +1790,14 @@ class TCPServer:
                         frame.command, fps_err or ErrorCode.CAMERA_PARAM_FAILED
                     )
 
+            # 预览期间强制关闭闪光灯，退出后自动恢复用户配置
+            flash_ok, flash_err = self._suspend_flash_for_streaming("预览")
+            if not flash_ok:
+                logger.warning("开启预览失败: 禁用闪光灯失败")
+                return ProtocolBuilder.build_error_response(
+                    frame.command, flash_err or ErrorCode.CAMERA_PARAM_FAILED
+                )
+
             #启动预览
             success, error_code = self._preview_acquisition.start_preview(
                 resolution_index=resolution_index,
@@ -1697,6 +1806,9 @@ class TCPServer:
 
             if not success:
                 logger.error(f"启动预览失败: 错误码=0x{error_code:04X}")
+                restore_ok, restore_err = self._restore_flash_after_streaming("预览")
+                if not restore_ok:
+                    logger.warning(f"预览启动失败后恢复闪光灯失败: 0x{(restore_err or ErrorCode.UNKNOWN_ERROR):04X}")
                 return ProtocolBuilder.build_error_response(
                     frame.command, error_code if error_code else ErrorCode.UNKNOWN_ERROR
                 )
@@ -1709,6 +1821,9 @@ class TCPServer:
 
         except Exception as e:
             logger.error(f"开启预览异常: {e}")
+            restore_ok, restore_err = self._restore_flash_after_streaming("预览")
+            if not restore_ok:
+                logger.warning(f"预览异常后恢复闪光灯失败: 0x{(restore_err or ErrorCode.UNKNOWN_ERROR):04X}")
             return self._build_exception_error_response(
                 frame.command, e, default_code=ErrorCode.UNKNOWN_ERROR
             )
@@ -1745,6 +1860,9 @@ class TCPServer:
 
             #更新状态
             self._is_previewing = False
+            restore_ok, restore_err = self._restore_flash_after_streaming("预览")
+            if not restore_ok:
+                logger.warning(f"预览结束后恢复闪光灯失败: 0x{(restore_err or ErrorCode.UNKNOWN_ERROR):04X}")
 
             logger.info("预览已停止")
             return ProtocolBuilder.build_success_response(frame.command)
@@ -1753,6 +1871,9 @@ class TCPServer:
             logger.error(f"停止预览异常: {e}")
             #即使异常也尝试更新状态
             self._is_previewing = False
+            restore_ok, restore_err = self._restore_flash_after_streaming("预览")
+            if not restore_ok:
+                logger.warning(f"预览异常停止后恢复闪光灯失败: 0x{(restore_err or ErrorCode.UNKNOWN_ERROR):04X}")
             return self._build_exception_error_response(
                 frame.command, e, default_code=ErrorCode.UNKNOWN_ERROR
             )
