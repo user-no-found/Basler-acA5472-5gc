@@ -809,7 +809,8 @@ class CameraController:
 
             frame_rate_node, frame_rate_node_name = self._get_first_available_node(
                 "AcquisitionFrameRate",
-                "AcquisitionFrameRateAbs"
+                "AcquisitionFrameRateAbs",
+                "BslAcquisitionFrameRate"
             )
             if frame_rate_node is None:
                 error_msg = "相机不支持帧率设置"
@@ -820,7 +821,8 @@ class CameraController:
             try:
                 enable_node, _ = self._get_first_available_node(
                     "AcquisitionFrameRateEnable",
-                    "AcquisitionFrameRateAbsEnable"
+                    "AcquisitionFrameRateAbsEnable",
+                    "BslAcquisitionFrameRateEnable"
                 )
                 if enable_node is not None:
                     try:
@@ -1377,7 +1379,8 @@ class CameraController:
 
             frame_rate_node, _ = self._get_first_available_node(
                 "AcquisitionFrameRate",
-                "AcquisitionFrameRateAbs"
+                "AcquisitionFrameRateAbs",
+                "BslAcquisitionFrameRate"
             )
             if frame_rate_node is None:
                 return (0, 0)
@@ -1387,6 +1390,32 @@ class CameraController:
             except Exception as e:
                 logger.error(f"获取帧率范围失败: {e}")
                 return (0, 0)
+
+    def get_resulting_frame_rate(self) -> float:
+        """
+        获取相机当前实际输出帧率（Resulting FPS）
+
+        Returns:
+            float: 实际帧率，无法获取时返回0.0
+        """
+        with self._lock:
+            if not self.is_connected or self._camera is None:
+                return 0.0
+
+            fps_node, node_name = self._get_first_available_node(
+                "ResultingFrameRateAbs",
+                "ResultingAcquisitionFrameRate",
+                "BslResultingAcquisitionFrameRate"
+            )
+            if fps_node is None:
+                return 0.0
+
+            try:
+                fps = float(fps_node.Value)
+                return fps if fps > 0 else 0.0
+            except Exception as e:
+                logger.debug(f"读取实际帧率失败({node_name}): {e}")
+                return 0.0
 
     def get_supported_pixel_formats(self) -> List[str]:
         """

@@ -53,6 +53,7 @@ class StatusMonitor(ttk.Frame):
             'wb_b': 0,
             'width': 0,
             'height': 0,
+            'cam_fps': 0.0,
         }
 
         #日志计数
@@ -129,6 +130,7 @@ class StatusMonitor(ttk.Frame):
             ('gain', '增益'),
             ('white_balance', '白平衡'),
             ('resolution', '分辨率'),
+            ('camera_fps', '相机帧率'),
         ]
 
         for key, label_text in param_items:
@@ -199,7 +201,7 @@ class StatusMonitor(ttk.Frame):
         解析参数结构体（0xA1响应）
 
         Args:
-            data: 18字节参数数据
+            data: 参数数据（18字节基础字段，22字节含相机实际帧率）
 
         Returns:
             参数字典，解析失败返回None
@@ -219,6 +221,8 @@ class StatusMonitor(ttk.Frame):
                 'wb_b': int.from_bytes(data[12:14], 'big'),
                 'width': int.from_bytes(data[14:16], 'big'),
                 'height': int.from_bytes(data[16:18], 'big'),
+                # 兼容扩展字段：相机实际帧率 * 100（4字节）
+                'cam_fps': int.from_bytes(data[18:22], 'big') / 100.0 if len(data) >= 22 else 0.0,
             }
         except Exception as e:
             logger.error(f"参数解析失败: {e}")
@@ -296,12 +300,19 @@ class StatusMonitor(ttk.Frame):
         height = params_data.get('height', 0)
         self._param_labels['resolution'].config(text=f"{width} x {height}")
 
+        #相机实际帧率显示
+        cam_fps = params_data.get('cam_fps', 0.0)
+        if cam_fps > 0:
+            self._param_labels['camera_fps'].config(text=f"{cam_fps:.1f} fps")
+        else:
+            self._param_labels['camera_fps'].config(text="--")
+
     def update_params_from_bytes(self, data: bytes):
         """
         从字节数据更新参数回显
 
         Args:
-            data: 18字节参数数据
+            data: 参数数据（18字节基础字段，22字节含相机实际帧率）
         """
         params = self.parse_params(data)
         if params:

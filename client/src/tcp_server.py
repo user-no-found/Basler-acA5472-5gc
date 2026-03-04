@@ -102,6 +102,7 @@ class TCPServer:
     PROTOCOL_FPS_MIN = 1
     PROTOCOL_FPS_MAX = 255
     RECORD_PREVIEW_JPEG_QUALITY = 80
+    RECORD_PREVIEW_MAX_EDGE = 960
 
     #========== 性能优化常量 ==========
     #发送缓冲区大小（64KB）
@@ -553,7 +554,7 @@ class TCPServer:
         """
         处理参数查询命令(0x31)
 
-        参数结构体(共18字节):
+        参数结构体(基础18字节，可扩展到22字节):
         - 曝光模式(1字节): 0-自动, 1-手动
         - 曝光值(4字节): 微秒，大端序
         - 增益(2字节): 大端序（乘以100后取整）
@@ -563,6 +564,7 @@ class TCPServer:
         - 白平衡B(2字节): 大端序（乘以100后取整）
         - 分辨率宽(2字节): 大端序
         - 分辨率高(2字节): 大端序
+        - 相机实际帧率(4字节，可选): fps*100，大端序
 
         Args:
             client: 客户端信息
@@ -1072,7 +1074,7 @@ class TCPServer:
         """
         构建参数数据
 
-        参数结构体(共18字节):
+        参数结构体(共22字节，前18字节保持兼容):
         - 曝光模式(1字节): 0-自动, 1-手动
         - 曝光值(4字节): 微秒，大端序
         - 增益(2字节): 大端序（乘以100后取整）
@@ -1082,6 +1084,7 @@ class TCPServer:
         - 白平衡B(2字节): 大端序（乘以100后取整）
         - 分辨率宽(2字节): 大端序
         - 分辨率高(2字节): 大端序
+        - 相机实际帧率(4字节): fps*100，大端序
 
         Returns:
             bytes: 参数数据
@@ -1096,6 +1099,7 @@ class TCPServer:
         wb_b = 100             #1.0 * 100
         width = 1920
         height = 1080
+        cam_fps_x100 = 0
 
         #从相机获取实际参数
         if self._camera and self._camera.is_connected:
@@ -1113,6 +1117,15 @@ class TCPServer:
                 width = params.width
                 height = params.height
 
+            #读取相机当前实际输出帧率（Resulting FPS）
+            try:
+                if hasattr(self._camera, "get_resulting_frame_rate"):
+                    cam_fps = float(self._camera.get_resulting_frame_rate())
+                    if cam_fps > 0:
+                        cam_fps_x100 = int(cam_fps * 100)
+            except Exception as e:
+                logger.debug(f"获取相机实际帧率失败: {e}")
+
             #尝试获取白平衡值（需要从相机直接读取）
             try:
                 if hasattr(self._camera, '_camera') and self._camera._camera:
@@ -1129,7 +1142,7 @@ class TCPServer:
 
         #打包数据（注意：曝光值用I是4字节无符号整数）
         data = struct.pack(
-            '>BIHBHHHHHH',
+            '>BIHBHHHHHHI',
             exposure_mode,     #曝光模式(1字节)
             exposure_us,       #曝光值(4字节，大端序)
             gain,              #增益(2字节，大端序)
@@ -1138,7 +1151,8 @@ class TCPServer:
             wb_g,              #白平衡G(2字节)
             wb_b,              #白平衡B(2字节)
             width,             #分辨率宽(2字节)
-            height             #分辨率高(2字节)
+            height,            #分辨率高(2字节)
+            cam_fps_x100       #相机实际帧率*100(4字节)
         )
         return data
 
@@ -1468,6 +1482,7 @@ class TCPServer:
 
             #导入采集模式
             from image_acquisition import AcquisitionMode
+            preview_resolution = self._get_record_preview_resolution(resolution)
 
             #定义帧回调函数
             def on_frame(image, frame_num):
@@ -1478,7 +1493,7 @@ class TCPServer:
                         logger.warning(f"写入视频帧失败: 帧号={frame_num}")
 
                 #录像时也实时回传GUI预览帧
-                self._send_record_preview_frame(image, frame_num, resolution)
+                self._send_record_preview_frame(image, frame_num, preview_resolution)
 
             #定义完成回调函数
             def on_complete():
@@ -1771,6 +1786,23 @@ class TCPServer:
         except Exception as e:
             logger.debug(f"录像预览JPEG编码失败: {e}")
             return None
+
+    def _get_record_preview_resolution(self, source_resolution: tuple) -> tuple:
+        """
+        计算录像回传预览分辨率，降低GUI链路负载。
+
+        保持长宽比，最长边不超过 RECORD_PREVIEW_MAX_EDGE。
+        """
+        src_w, src_h = source_resolution
+        max_edge = max(1, int(self.RECORD_PREVIEW_MAX_EDGE))
+        longest = max(src_w, src_h)
+        if longest <= max_edge:
+            return source_resolution
+
+        scale = max_edge / float(longest)
+        target_w = max(1, int(src_w * scale))
+        target_h = max(1, int(src_h * scale))
+        return (target_w, target_h)
 
     def _send_record_preview_frame(self, image, frame_num: int, resolution: tuple) -> None:
         """

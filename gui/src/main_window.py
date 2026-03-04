@@ -102,6 +102,8 @@ class MainWindow:
         #状态变量
         self._connection_state = ConnectionState.DISCONNECTED
         self._last_error_code: Optional[int] = None
+        self._params_poll_job: Optional[str] = None
+        self._params_poll_interval_ms = 1000
 
         #加载配置
         self._settings = SettingsDialog.get_settings()
@@ -290,6 +292,36 @@ class MainWindow:
         finally:
             self.root.after(300, self._schedule_record_fps_update)
 
+    def _start_params_polling(self):
+        """启动参数自动轮询（替代手动查询按钮）"""
+        self._stop_params_polling()
+        self._poll_params_once()
+
+    def _stop_params_polling(self):
+        """停止参数自动轮询"""
+        if self._params_poll_job is not None:
+            try:
+                self.root.after_cancel(self._params_poll_job)
+            except Exception:
+                pass
+            self._params_poll_job = None
+
+    def _poll_params_once(self):
+        """执行一次参数查询并安排下次轮询"""
+        if self._connection_state != ConnectionState.CONNECTED:
+            self._params_poll_job = None
+            return
+
+        try:
+            self.client.send(build_query_params())
+        except Exception as e:
+            logger.debug(f"发送自动参数查询失败: {e}")
+
+        self._params_poll_job = self.root.after(
+            self._params_poll_interval_ms,
+            self._poll_params_once
+        )
+
     def _update_status_indicator(self, color: str):
         """更新状态指示灯"""
         self.status_indicator.delete("all")
@@ -347,10 +379,13 @@ class MainWindow:
         self.root.after(0, self._update_ui_state)
 
         if state == ConnectionState.CONNECTED:
+            self.root.after(0, self._start_params_polling)
             self.root.after(0, lambda: self._log("已连接到服务器"))
         elif state == ConnectionState.DISCONNECTED:
+            self.root.after(0, self._stop_params_polling)
             self.root.after(0, lambda: self._log("已断开连接"))
         elif state == ConnectionState.RECONNECTING:
+            self.root.after(0, self._stop_params_polling)
             self.root.after(0, lambda: self._log("正在尝试重连..."))
 
     def _on_reconnect_failed(self):
@@ -516,6 +551,7 @@ class MainWindow:
     def _on_disconnect_click(self):
         """断开按钮点击"""
         self._log("正在断开连接...")
+        self._stop_params_polling()
         self.client.disconnect()
 
     def _on_capture_click(self):
@@ -565,6 +601,7 @@ class MainWindow:
 
     def _on_close(self):
         """窗口关闭事件"""
+        self._stop_params_polling()
         if self.client.is_connected:
             self.client.disconnect()
         self.root.destroy()

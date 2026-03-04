@@ -7,7 +7,6 @@
 - 录像控制（开始/停止、时长、分辨率、帧率、状态显示）
 - 预览控制（开启/停止、分辨率、帧率、状态显示）
 - 参数设置（曝光模式/值、增益、白平衡模式）
-- 查询功能（状态、参数、分辨率列表）
 """
 
 import tkinter as tk
@@ -22,8 +21,7 @@ from protocol_builder import (
     build_set_exposure, build_set_gain, build_set_white_balance,
     build_set_resolution,
     build_set_gain_auto, build_set_frame_rate, build_set_pixel_format,
-    build_set_flash,
-    build_query_status, build_query_params, build_query_resolutions
+    build_set_flash
 )
 from error_codes import get_error_message
 
@@ -95,9 +93,6 @@ class ControlPanel(ttk.Frame):
 
         #闪光灯控制
         self._create_flash_section()
-
-        #查询功能
-        self._create_query_section()
 
     def _create_capture_section(self):
         """创建拍照控制区域"""
@@ -391,23 +386,6 @@ class ControlPanel(ttk.Frame):
         self.apply_params_btn = ttk.Button(frame, text="应用参数", command=self._on_apply_params)
         self.apply_params_btn.pack(fill=tk.X, pady=(5, 2))
 
-    def _create_query_section(self):
-        """创建查询功能区域"""
-        frame = ttk.LabelFrame(self, text="查询功能", padding="5")
-        frame.pack(fill=tk.X, pady=(0, 5))
-
-        #查询状态
-        self.query_status_btn = ttk.Button(frame, text="查询状态", command=self._on_query_status)
-        self.query_status_btn.pack(fill=tk.X, pady=2)
-
-        #查询参数
-        self.query_params_btn = ttk.Button(frame, text="查询参数", command=self._on_query_params)
-        self.query_params_btn.pack(fill=tk.X, pady=2)
-
-        #查询分辨率列表
-        self.query_res_btn = ttk.Button(frame, text="查询分辨率列表", command=self._on_query_resolutions)
-        self.query_res_btn.pack(fill=tk.X, pady=2)
-
     def _create_flash_section(self):
         """创建闪光灯控制区域"""
         frame = ttk.LabelFrame(self, text="闪光灯控制（L2 + Timer）", padding="5")
@@ -687,21 +665,6 @@ class ControlPanel(ttk.Frame):
             )
         )
 
-    def _on_query_status(self):
-        """查询状态按钮点击"""
-        logger.info("发送查询状态命令")
-        self._send(build_query_status())
-
-    def _on_query_params(self):
-        """查询参数按钮点击"""
-        logger.info("发送查询参数命令")
-        self._send(build_query_params())
-
-    def _on_query_resolutions(self):
-        """查询分辨率列表按钮点击"""
-        logger.info("发送查询分辨率列表命令")
-        self._send(build_query_resolutions())
-
     def set_enabled(self, enabled: bool):
         """
         设置控制面板启用/禁用状态
@@ -761,11 +724,6 @@ class ControlPanel(ttk.Frame):
         self.pixel_format_combo.config(state="readonly" if enabled else tk.DISABLED)
 
         self.apply_params_btn.config(state=state)
-
-        #查询
-        self.query_status_btn.config(state=state)
-        self.query_params_btn.config(state=state)
-        self.query_res_btn.config(state=state)
 
         #闪光灯
         self.flash_enable_check.config(state=state)
