@@ -232,9 +232,34 @@ class MainWindow:
         control_frame = ttk.Frame(parent)
         control_frame.pack(side=tk.LEFT, fill=tk.Y, padx=(0, 5))
 
-        self.control_panel = ControlPanel(control_frame, self._send_command)
-        self.control_panel.pack(fill=tk.Y, expand=True)
+        # 控制面板内容较长（含闪光灯配置），使用滚动容器避免底部被截断
+        self._control_canvas = tk.Canvas(control_frame, borderwidth=0, highlightthickness=0, width=320)
+        self._control_scrollbar = ttk.Scrollbar(control_frame, orient=tk.VERTICAL, command=self._control_canvas.yview)
+        self._control_canvas.configure(yscrollcommand=self._control_scrollbar.set)
+        self._control_canvas.pack(side=tk.LEFT, fill=tk.Y, expand=False)
+        self._control_scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
+
+        self._control_panel_host = ttk.Frame(self._control_canvas)
+        self._control_canvas_window = self._control_canvas.create_window(
+            (0, 0),
+            window=self._control_panel_host,
+            anchor="nw"
+        )
+
+        self._control_panel_host.bind("<Configure>", self._on_control_panel_configure)
+        self._control_canvas.bind("<Configure>", self._on_control_canvas_configure)
+
+        self.control_panel = ControlPanel(self._control_panel_host, self._send_command)
+        self.control_panel.pack(fill=tk.BOTH, expand=True)
         self.control_panel.set_enabled(False)
+
+    def _on_control_panel_configure(self, _event):
+        """控制面板内容变化时更新滚动区域"""
+        self._control_canvas.configure(scrollregion=self._control_canvas.bbox("all"))
+
+    def _on_control_canvas_configure(self, event):
+        """控制面板容器宽度跟随画布，避免内部控件横向截断"""
+        self._control_canvas.itemconfigure(self._control_canvas_window, width=event.width)
 
     def _create_preview_area(self, parent):
         """创建预览显示区域"""

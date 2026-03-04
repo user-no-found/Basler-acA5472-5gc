@@ -1395,6 +1395,23 @@ class TCPServer:
 
             logger.info(f"开始录像: 时长={duration}秒, 分辨率={resolution}, 帧率={fps}")
 
+            #先下发ROI和帧率，避免仅使用请求值但相机侧未真正生效
+            if self._camera and hasattr(self._camera, "set_resolution"):
+                res_ok, res_err = self._camera.set_resolution(resolution[0], resolution[1])
+                if not res_ok:
+                    logger.warning("开始录像失败: 预设ROI分辨率失败")
+                    return ProtocolBuilder.build_error_response(
+                        frame.command, res_err or ErrorCode.CAMERA_PARAM_FAILED
+                    )
+
+            if self._camera and hasattr(self._camera, "set_frame_rate"):
+                fps_ok, fps_err = self._camera.set_frame_rate(float(fps), True)
+                if not fps_ok:
+                    logger.warning("开始录像失败: 预设相机帧率失败")
+                    return ProtocolBuilder.build_error_response(
+                        frame.command, fps_err or ErrorCode.CAMERA_PARAM_FAILED
+                    )
+
             #生成视频文件名
             video_filename = self._image_processor.generate_video_filename()
 
@@ -1588,8 +1605,26 @@ class TCPServer:
             #解析数据
             resolution_index = frame.data[0]  #分辨率索引
             fps = self._normalize_fps(frame.data[1])  #帧率（动态裁剪）
+            resolution = self.RESOLUTION_MAP.get(resolution_index, (1920, 1080))
 
             logger.info(f"开启预览: 分辨率索引={resolution_index}, 帧率={fps}")
+
+            #先下发ROI和帧率，确保预览链路按相机真实能力工作
+            if self._camera and hasattr(self._camera, "set_resolution"):
+                res_ok, res_err = self._camera.set_resolution(resolution[0], resolution[1])
+                if not res_ok:
+                    logger.warning("开启预览失败: 预设ROI分辨率失败")
+                    return ProtocolBuilder.build_error_response(
+                        frame.command, res_err or ErrorCode.CAMERA_PARAM_FAILED
+                    )
+
+            if self._camera and hasattr(self._camera, "set_frame_rate"):
+                fps_ok, fps_err = self._camera.set_frame_rate(float(fps), True)
+                if not fps_ok:
+                    logger.warning("开启预览失败: 预设相机帧率失败")
+                    return ProtocolBuilder.build_error_response(
+                        frame.command, fps_err or ErrorCode.CAMERA_PARAM_FAILED
+                    )
 
             #启动预览
             success, error_code = self._preview_acquisition.start_preview(

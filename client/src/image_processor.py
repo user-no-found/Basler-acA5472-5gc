@@ -16,6 +16,7 @@ import os
 import io
 import shutil
 import threading
+import platform
 from datetime import datetime
 from typing import Optional, Tuple
 
@@ -406,15 +407,24 @@ class ImageProcessor:
             full_path = os.path.join(self._video_path, filename)
 
             try:
-                #尝试使用H.264编码器
-                #优先尝试的编码器列表
-                codecs = [
-                    ('H264', 'mp4'),
-                    ('avc1', 'mp4'),
-                    ('X264', 'mp4'),
-                    ('mp4v', 'mp4'),
-                    ('XVID', 'avi'),
-                ]
+                #编码器优先级：
+                #Windows优先mp4v，避免OpenH264版本不匹配导致初始化失败
+                if platform.system().lower().startswith("win"):
+                    codecs = [
+                        ('mp4v', 'mp4'),
+                        ('XVID', 'avi'),
+                        ('H264', 'mp4'),
+                        ('avc1', 'mp4'),
+                        ('X264', 'mp4'),
+                    ]
+                else:
+                    codecs = [
+                        ('H264', 'mp4'),
+                        ('avc1', 'mp4'),
+                        ('X264', 'mp4'),
+                        ('mp4v', 'mp4'),
+                        ('XVID', 'avi'),
+                    ]
 
                 width, height = resolution
                 writer = None

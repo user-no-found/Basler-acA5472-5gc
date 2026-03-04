@@ -807,26 +807,44 @@ class CameraController:
                 self._report_error(ErrorCode.CAMERA_NOT_CONNECTED, error_msg)
                 return False, ErrorCode.CAMERA_NOT_CONNECTED
 
-            if not hasattr(self._camera, 'AcquisitionFrameRate'):
+            frame_rate_node, frame_rate_node_name = self._get_first_available_node(
+                "AcquisitionFrameRate",
+                "AcquisitionFrameRateAbs"
+            )
+            if frame_rate_node is None:
                 error_msg = "相机不支持帧率设置"
                 logger.warning(error_msg)
                 self._report_error(ErrorCode.CAMERA_PARAM_FAILED, error_msg)
                 return False, ErrorCode.CAMERA_PARAM_FAILED
 
             try:
-                if hasattr(self._camera, 'AcquisitionFrameRateEnable'):
-                    self._camera.AcquisitionFrameRateEnable.SetValue(bool(enable))
+                enable_node, _ = self._get_first_available_node(
+                    "AcquisitionFrameRateEnable",
+                    "AcquisitionFrameRateAbsEnable"
+                )
+                if enable_node is not None:
+                    try:
+                        enable_node.SetValue(bool(enable))
+                    except Exception as e:
+                        logger.warning(f"设置帧率开关失败，继续尝试设置帧率值: {e}")
                 elif not enable:
                     logger.warning("相机不支持帧率开关，已忽略禁用请求")
 
                 if enable:
-                    min_fps = self._camera.AcquisitionFrameRate.Min
-                    max_fps = self._camera.AcquisitionFrameRate.Max
+                    min_fps = float(frame_rate_node.Min)
+                    max_fps = float(frame_rate_node.Max)
                     if fps < min_fps or fps > max_fps:
                         logger.warning(f"帧率{fps}超出范围[{min_fps}, {max_fps}]，自动调整")
-                    fps = max(min_fps, min(max_fps, fps))
-                    self._camera.AcquisitionFrameRate.SetValue(fps)
-                    logger.info(f"帧率设置为: {fps:.2f} fps")
+                    fps = max(min_fps, min(max_fps, float(fps)))
+
+                    set_ok, applied_value = self._set_numeric_node(frame_rate_node, fps)
+                    if not set_ok:
+                        error_msg = "设置帧率值失败"
+                        logger.error(error_msg)
+                        self._report_error(ErrorCode.CAMERA_PARAM_FAILED, error_msg)
+                        return False, ErrorCode.CAMERA_PARAM_FAILED
+
+                    logger.info(f"帧率设置为: {applied_value:.2f} fps ({frame_rate_node_name})")
                 else:
                     logger.info("帧率限制已关闭")
 
@@ -1354,11 +1372,15 @@ class CameraController:
             if not self.is_connected or self._camera is None:
                 return (0, 0)
 
-            if not hasattr(self._camera, 'AcquisitionFrameRate'):
+            frame_rate_node, _ = self._get_first_available_node(
+                "AcquisitionFrameRate",
+                "AcquisitionFrameRateAbs"
+            )
+            if frame_rate_node is None:
                 return (0, 0)
 
             try:
-                return (self._camera.AcquisitionFrameRate.Min, self._camera.AcquisitionFrameRate.Max)
+                return (float(frame_rate_node.Min), float(frame_rate_node.Max))
             except Exception as e:
                 logger.error(f"获取帧率范围失败: {e}")
                 return (0, 0)
