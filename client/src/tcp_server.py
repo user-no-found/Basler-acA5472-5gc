@@ -1436,8 +1436,14 @@ class TCPServer:
             return ProtocolBuilder.build_error_response(
                 frame.command, ErrorCode.STATE_RECORDING
             )
+        if self._is_capturing:
+            logger.warning("拍照失败: 正在拍照中")
+            return ProtocolBuilder.build_error_response(
+                frame.command, ErrorCode.STATE_CAPTURING
+            )
 
         try:
+            self._is_capturing = True
             #执行拍照
             logger.info("开始拍照...")
             image_array, error_code = self._camera.grab_single()
@@ -1466,6 +1472,8 @@ class TCPServer:
             return self._build_exception_error_response(
                 frame.command, e, default_code=ErrorCode.UNKNOWN_ERROR
             )
+        finally:
+            self._is_capturing = False
 
     #========== 录像控制处理器 ==========
 

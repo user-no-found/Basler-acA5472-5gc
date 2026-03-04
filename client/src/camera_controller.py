@@ -1184,9 +1184,30 @@ class CameraController:
                 self._report_error(ErrorCode.CAMERA_NOT_CONNECTED, error_msg)
                 return None, ErrorCode.CAMERA_NOT_CONNECTED
 
+            acq_mode_node = None
+            previous_acq_mode = None
             try:
-                #单次采集
-                self._camera.StartGrabbing(pylon.GrabStrategy_LatestImageOnly)
+                # 如果上一次流程残留抓流状态，先停止再执行单拍。
+                if self._camera.IsGrabbing():
+                    logger.warning("单拍前检测到抓流仍在进行，已先停止抓流")
+                    self._camera.StopGrabbing()
+
+                # 尝试切换到SingleFrame，避免进入连续曝光节奏导致额外触发。
+                acq_mode_node, _ = self._get_first_available_node("AcquisitionMode")
+                if acq_mode_node is not None:
+                    try:
+                        previous_acq_mode = str(acq_mode_node.Value)
+                    except Exception:
+                        previous_acq_mode = None
+                    self._set_enum_node(acq_mode_node, ["SingleFrame"])
+
+                # 严格单帧抓取（one-shot）
+                try:
+                    self._camera.StartGrabbingMax(1, pylon.GrabStrategy_OneByOne)
+                except TypeError:
+                    # 兼容不同pypylon签名
+                    self._camera.StartGrabbingMax(1)
+
                 grab_result = self._camera.RetrieveResult(
                     self._grab_timeout,
                     pylon.TimeoutHandling_ThrowException
@@ -1195,7 +1216,8 @@ class CameraController:
                 if grab_result.GrabSucceeded():
                     image = self._convert_grab_result(grab_result)
                     grab_result.Release()
-                    self._camera.StopGrabbing()
+                    if self._camera.IsGrabbing():
+                        self._camera.StopGrabbing()
                     logger.debug(f"采集成功，图像尺寸: {image.shape}")
                     return image, None
                 else:
@@ -1203,7 +1225,8 @@ class CameraController:
                     logger.error(error_msg)
                     self._report_error(ErrorCode.CAMERA_GRAB_TIMEOUT, error_msg)
                     grab_result.Release()
-                    self._camera.StopGrabbing()
+                    if self._camera.IsGrabbing():
+                        self._camera.StopGrabbing()
                     return None, ErrorCode.CAMERA_GRAB_TIMEOUT
 
             except pylon.TimeoutException:
@@ -1235,6 +1258,14 @@ class CameraController:
                     return None, ErrorCode.CAMERA_DISCONNECTED
                 self._report_error(ErrorCode.CAMERA_GRAB_TIMEOUT, error_msg)
                 return None, ErrorCode.CAMERA_GRAB_TIMEOUT
+            finally:
+                # 恢复原采集模式，避免影响预览/录像链路。
+                if acq_mode_node is not None and previous_acq_mode:
+                    try:
+                        if str(acq_mode_node.Value) != previous_acq_mode:
+                            acq_mode_node.SetValue(previous_acq_mode)
+                    except Exception as e:
+                        logger.debug(f"恢复采集模式失败({previous_acq_mode}): {e}")
 
     #========== 查询功能 ==========
 
