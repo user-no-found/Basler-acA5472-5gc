@@ -388,7 +388,7 @@ class ControlPanel(ttk.Frame):
 
     def _create_flash_section(self):
         """创建闪光灯控制区域"""
-        frame = ttk.LabelFrame(self, text="闪光灯控制（L2 + Timer）", padding="5")
+        frame = ttk.LabelFrame(self, text="闪光灯控制（TCP端口触发）", padding="5")
         frame.pack(fill=tk.X, pady=(0, 5))
 
         enable_frame = ttk.Frame(frame)
@@ -403,25 +403,15 @@ class ControlPanel(ttk.Frame):
 
         delay_frame = ttk.Frame(frame)
         delay_frame.pack(fill=tk.X, pady=2)
-        ttk.Label(delay_frame, text="延时(us):").pack(side=tk.LEFT)
+        ttk.Label(delay_frame, text="触发间隔(ms):").pack(side=tk.LEFT)
         self.flash_delay_var = tk.StringVar(value="0")
         self.flash_delay_entry = ttk.Entry(delay_frame, textvariable=self.flash_delay_var, width=10)
         self.flash_delay_entry.pack(side=tk.LEFT, padx=(5, 0))
-
-        duration_frame = ttk.Frame(frame)
-        duration_frame.pack(fill=tk.X, pady=2)
-        ttk.Label(duration_frame, text="脉宽(us):").pack(side=tk.LEFT)
-        self.flash_duration_var = tk.StringVar(value="100")
-        self.flash_duration_entry = ttk.Entry(duration_frame, textvariable=self.flash_duration_var, width=10)
-        self.flash_duration_entry.pack(side=tk.LEFT, padx=(5, 0))
-
-        interval_frame = ttk.Frame(frame)
-        interval_frame.pack(fill=tk.X, pady=2)
-        ttk.Label(interval_frame, text="间隔(us):").pack(side=tk.LEFT)
-        self.flash_interval_var = tk.StringVar(value="0")
-        self.flash_interval_entry = ttk.Entry(interval_frame, textvariable=self.flash_interval_var, width=10)
-        self.flash_interval_entry.pack(side=tk.LEFT, padx=(5, 0))
-        ttk.Label(interval_frame, text="(不支持时自动忽略)", foreground="gray").pack(side=tk.LEFT, padx=(5, 0))
+        ttk.Label(
+            delay_frame,
+            text="(正值=相机先触发, 负值=闪光先触发)",
+            foreground="gray"
+        ).pack(side=tk.LEFT, padx=(5, 0))
 
         self.apply_flash_btn = ttk.Button(frame, text="应用闪光灯设置", command=self._on_apply_flash)
         self.apply_flash_btn.pack(fill=tk.X, pady=(5, 2))
@@ -631,37 +621,20 @@ class ControlPanel(ttk.Frame):
         enable = self.flash_enable_var.get()
 
         delay_str = self.flash_delay_var.get().strip()
-        duration_str = self.flash_duration_var.get().strip()
-        interval_str = self.flash_interval_var.get().strip()
 
         try:
-            delay_us = max(0, int(delay_str))
+            delay_ms = int(delay_str)
         except ValueError:
-            delay_us = 0
-            self._show_input_warning("闪光延时(us)", delay_str, delay_us)
-
-        try:
-            duration_us = max(1, int(duration_str))
-        except ValueError:
-            duration_us = 100
-            self._show_input_warning("闪光脉宽(us)", duration_str, duration_us)
-
-        try:
-            interval_us = max(0, int(interval_str))
-        except ValueError:
-            interval_us = 0
-            self._show_input_warning("闪光间隔(us)", interval_str, interval_us)
+            delay_ms = 0
+            self._show_input_warning("闪光触发间隔(ms)", delay_str, delay_ms)
 
         logger.info(
-            f"发送闪光灯设置: enable={enable}, delay={delay_us}us, "
-            f"duration={duration_us}us, interval={interval_us}us"
+            f"发送闪光灯设置: enable={enable}, delay={delay_ms}ms"
         )
         self._send(
             build_set_flash(
                 enable=enable,
-                delay_us=delay_us,
-                duration_us=duration_us,
-                interval_us=interval_us
+                delay_ms=delay_ms
             )
         )
 
@@ -728,8 +701,6 @@ class ControlPanel(ttk.Frame):
         #闪光灯
         self.flash_enable_check.config(state=state)
         self.flash_delay_entry.config(state=state)
-        self.flash_duration_entry.config(state=state)
-        self.flash_interval_entry.config(state=state)
         self.apply_flash_btn.config(state=state)
 
     def set_recording_state(self, is_recording: bool):

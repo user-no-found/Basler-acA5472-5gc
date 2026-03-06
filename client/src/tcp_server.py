@@ -103,6 +103,13 @@ class TCPServer:
     PROTOCOL_FPS_MAX = 255
     RECORD_PREVIEW_JPEG_QUALITY = 80
     RECORD_PREVIEW_MAX_EDGE = 960
+    # 外部闪光灯触发（固定TCP目标）
+    FLASH_TRIGGER_HOST = "192.168.201"
+    FLASH_TRIGGER_PORT = 3000
+    FLASH_TRIGGER_TIMEOUT_SEC = 0.2
+    FLASH_TRIGGER_PAYLOAD = b"\x00"
+    # 连拍周期（秒）
+    CONTINUOUS_INTERVAL_SEC = 1.0
 
     #========== 性能优化常量 ==========
     #发送缓冲区大小（64KB）
@@ -163,14 +170,13 @@ class TCPServer:
         self._is_continuous = False   #正在连续拍照
 
         #闪光灯状态缓存
-        #保存用户最新配置；录像/预览期间仅缓存，退出后恢复
+        # 保存用户最新配置；录像/预览期间仅缓存，退出后恢复
         self._flash_user_config = {
             "enable": False,
-            "delay_us": 0,
-            "duration_us": 100,
-            "interval_us": 0,
+            "delay_ms": 0,  # 支持负值：负值表示闪光先触发
         }
         self._flash_forced_disabled = False
+        self._flash_trigger_lock = threading.Lock()
 
         #录像相关
         self._recording_task: Optional[asyncio.Task] = None
@@ -926,55 +932,50 @@ class TCPServer:
         """
         处理闪光灯设置命令(0x27)
 
-        数据格式: [启用1字节][延时4字节][脉宽4字节][间隔4字节]
+        新格式: [启用1字节][延时4字节(有符号ms, 大端)]
         - 启用: 0-关闭, 1-开启
-        - 延时/脉宽/间隔: 微秒，大端序无符号整数
-        """
-        if self._camera is None or not self._camera.is_connected:
-            logger.warning("设置闪光灯失败: 相机未连接")
-            return ProtocolBuilder.build_error_response(
-                frame.command, ErrorCode.CAMERA_NOT_CONNECTED
-            )
+        - 延时: 支持负值；正值=相机先触发，负值=闪光先触发
 
-        if len(frame.data) < 13:
-            logger.warning(f"设置闪光灯失败: 数据长度不足，期望13字节，实际{len(frame.data)}字节")
+        兼容旧格式(13字节): [启用1字节][延时4字节us][脉宽4字节][间隔4字节]
+        - 旧格式的脉宽/间隔字段会被忽略，仅将delay_us转换为delay_ms。
+        """
+        if len(frame.data) not in (5, 13):
+            logger.warning(
+                f"设置闪光灯失败: 数据长度非法，期望5(新协议)或13(兼容旧协议)，实际{len(frame.data)}字节"
+            )
             return ProtocolBuilder.build_error_response(
                 frame.command, ErrorCode.DATA_LENGTH_ERROR
             )
 
         try:
             enable = frame.data[0] == 1
-            delay_us = struct.unpack('>I', frame.data[1:5])[0]
-            duration_us = struct.unpack('>I', frame.data[5:9])[0]
-            interval_us = struct.unpack('>I', frame.data[9:13])[0]
+            if len(frame.data) == 5:
+                delay_ms = struct.unpack('>i', frame.data[1:5])[0]
+            else:
+                delay_us = struct.unpack('>I', frame.data[1:5])[0]
+                delay_ms = int(delay_us / 1000)
+                logger.warning(
+                    "收到旧版闪光灯协议(13字节)，已按delay_us转换为delay_ms；脉宽/间隔字段已忽略"
+                )
 
             # 先缓存用户配置。录像/预览期间只缓存，退出后恢复。
             self._flash_user_config = {
                 "enable": bool(enable),
-                "delay_us": int(delay_us),
-                "duration_us": int(duration_us),
-                "interval_us": int(interval_us),
+                "delay_ms": int(delay_ms),
             }
 
-            logger.info(
-                f"设置闪光灯: enable={enable}, delay={delay_us}us, "
-                f"duration={duration_us}us, interval={interval_us}us"
-            )
+            logger.info(f"设置闪光灯(TCP触发): enable={enable}, delay={delay_ms}ms")
+            if abs(delay_ms) >= int(self.CONTINUOUS_INTERVAL_SEC * 1000):
+                logger.warning(
+                    "闪光延时绝对值大于等于连拍周期，连拍时会出现跨周期交错触发"
+                )
 
             if self._is_streaming_active():
                 logger.info("当前处于录像/预览中，闪光灯配置已缓存，将在退出后恢复")
                 return ProtocolBuilder.build_success_response(frame.command)
 
-            success, error_code = self._apply_flash_config(
-                self._flash_user_config,
-                reason="用户主动设置闪光灯"
-            )
-            if success:
-                self._flash_forced_disabled = False
-                return ProtocolBuilder.build_success_response(frame.command)
-            return ProtocolBuilder.build_error_response(
-                frame.command, error_code or ErrorCode.CAMERA_PARAM_FAILED
-            )
+            self._flash_forced_disabled = False
+            return ProtocolBuilder.build_success_response(frame.command)
         except Exception as e:
             logger.error(f"设置闪光灯异常: {e}")
             return ProtocolBuilder.build_error_response(
@@ -1218,38 +1219,111 @@ class TCPServer:
         """当前是否处于录像或预览"""
         return self._is_recording or self._is_previewing
 
-    def _apply_flash_config(self, config: dict, reason: str = "") -> tuple[bool, Optional[int]]:
+    def _is_flash_output_enabled(self) -> bool:
+        """当前是否允许发送闪光触发（受用户配置和录像/预览强制禁用状态影响）"""
+        if self._flash_forced_disabled:
+            return False
+        return bool(self._flash_user_config.get("enable", False))
+
+    def _send_flash_trigger(self, scene: str) -> bool:
         """
-        下发闪光灯配置到相机
-
-        Args:
-            config: 闪光灯配置字典
-            reason: 日志用途
-
-        Returns:
-            tuple[bool, Optional[int]]: (是否成功, 错误码)
+        通过TCP发送闪光触发（单字节0x00）
         """
-        if self._camera is None or not self._camera.is_connected:
-            logger.warning(f"下发闪光灯配置失败（相机未连接）: {reason}")
-            return False, ErrorCode.CAMERA_NOT_CONNECTED
-
-        if not hasattr(self._camera, "set_flash_l2_timer"):
-            logger.warning(f"下发闪光灯配置失败（接口缺失）: {reason}")
-            return False, ErrorCode.CAMERA_PARAM_FAILED
+        if not self._is_flash_output_enabled():
+            logger.debug(f"跳过闪光触发（当前禁用）: {scene}")
+            return False
 
         try:
-            success, error_code = self._camera.set_flash_l2_timer(
-                enable=bool(config.get("enable", False)),
-                delay_us=max(0, int(config.get("delay_us", 0))),
-                duration_us=max(1, int(config.get("duration_us", 100))),
-                interval_us=max(0, int(config.get("interval_us", 0)))
+            with self._flash_trigger_lock:
+                with socket.create_connection(
+                    (self.FLASH_TRIGGER_HOST, self.FLASH_TRIGGER_PORT),
+                    timeout=self.FLASH_TRIGGER_TIMEOUT_SEC
+                ) as sock:
+                    sock.sendall(self.FLASH_TRIGGER_PAYLOAD)
+            logger.info(
+                f"闪光触发已发送: target={self.FLASH_TRIGGER_HOST}:{self.FLASH_TRIGGER_PORT}, scene={scene}"
             )
-            if not success:
-                logger.warning(f"下发闪光灯配置失败: reason={reason}, code={error_code}")
-            return success, error_code
+            return True
         except Exception as e:
-            logger.error(f"下发闪光灯配置异常: reason={reason}, error={e}")
-            return False, ErrorCode.CAMERA_PARAM_FAILED
+            logger.warning(
+                f"闪光触发发送失败: target={self.FLASH_TRIGGER_HOST}:{self.FLASH_TRIGGER_PORT}, "
+                f"scene={scene}, error={e}"
+            )
+            return False
+
+    def _schedule_flash_trigger(
+        self,
+        delay_sec: float,
+        scene: str,
+        stop_event: Optional[threading.Event] = None
+    ) -> None:
+        """
+        延时发送闪光触发。用于“相机先触发、闪光后触发”的路径，避免阻塞主拍照流程。
+        """
+        safe_delay = max(0.0, float(delay_sec))
+
+        def _worker():
+            if safe_delay > 0:
+                if stop_event is not None:
+                    if stop_event.wait(timeout=safe_delay):
+                        return
+                else:
+                    time.sleep(safe_delay)
+            self._send_flash_trigger(scene)
+
+        threading.Thread(
+            target=_worker,
+            daemon=True,
+            name="FlashTriggerDelayed"
+        ).start()
+
+    def _capture_single_with_flash_timing(
+        self,
+        scene: str,
+        stop_event: Optional[threading.Event] = None
+    ) -> tuple[Optional[Any], Optional[int], float, str, bool]:
+        """
+        执行一次“相机+闪光”时序触发并抓图。
+
+        Returns:
+            (image_array, error_code, lead_ts, lead_source, cancelled)
+            lead_source: "camera" 或 "flash"
+        """
+        delay_ms = int(self._flash_user_config.get("delay_ms", 0))
+        flash_enabled = self._is_flash_output_enabled()
+
+        # 闪光未启用时，直接由相机触发抓图
+        if not flash_enabled:
+            lead_ts = time.monotonic()
+            logger.debug(f"{scene}: 主触发=相机(闪光未启用)")
+            image_array, error_code = self._camera.grab_single()
+            return image_array, error_code, lead_ts, "camera", False
+
+        # delay<0: 闪光先触发，再过|delay|后相机触发
+        if delay_ms < 0:
+            lead_ts = time.monotonic()
+            wait_sec = abs(delay_ms) / 1000.0
+            logger.info(f"{scene}: 主触发=闪光, 跟随触发=相机, 偏移={wait_sec:.3f}s")
+            self._send_flash_trigger(f"{scene}-lead-flash")
+            if wait_sec > 0:
+                if stop_event is not None and stop_event.wait(timeout=wait_sec):
+                    return None, None, lead_ts, "flash", True
+                if stop_event is None:
+                    time.sleep(wait_sec)
+            image_array, error_code = self._camera.grab_single()
+            return image_array, error_code, lead_ts, "flash", False
+
+        # delay>=0: 相机先触发，闪光延时触发（异步发送，避免阻塞拍照）
+        lead_ts = time.monotonic()
+        delay_sec = delay_ms / 1000.0
+        logger.info(f"{scene}: 主触发=相机, 跟随触发=闪光, 偏移={delay_sec:.3f}s")
+        self._schedule_flash_trigger(
+            delay_sec=delay_sec,
+            scene=f"{scene}-follow-flash",
+            stop_event=stop_event
+        )
+        image_array, error_code = self._camera.grab_single()
+        return image_array, error_code, lead_ts, "camera", False
 
     def _suspend_flash_for_streaming(self, scene: str) -> tuple[bool, Optional[int]]:
         """
@@ -1258,12 +1332,9 @@ class TCPServer:
         if self._flash_forced_disabled:
             return True, None
 
-        disable_config = dict(self._flash_user_config)
-        disable_config["enable"] = False
-        success, error_code = self._apply_flash_config(disable_config, reason=f"{scene}开始前禁用闪光灯")
-        if success:
-            self._flash_forced_disabled = True
-        return success, error_code
+        self._flash_forced_disabled = True
+        logger.info(f"{scene}开始前已禁用闪光触发（TCP触发门禁）")
+        return True, None
 
     def _restore_flash_after_streaming(self, scene: str) -> tuple[bool, Optional[int]]:
         """
@@ -1275,13 +1346,10 @@ class TCPServer:
         if not self._flash_forced_disabled:
             return True, None
 
-        success, error_code = self._apply_flash_config(
-            self._flash_user_config,
-            reason=f"{scene}结束后恢复闪光灯"
-        )
-        # 不论恢复是否成功，都清理运行期强制标记，避免后续状态卡死。
+        # TCP触发模式下只恢复逻辑门禁，不需要向相机下发Line2配置。
         self._flash_forced_disabled = False
-        return success, error_code
+        logger.info(f"{scene}结束后已恢复闪光触发状态: enable={self._flash_user_config.get('enable', False)}")
+        return True, None
 
     async def _send_to_client(self, client: ClientInfo, data: bytes):
         """
@@ -1446,12 +1514,18 @@ class TCPServer:
             self._is_capturing = True
             #执行拍照
             logger.info("开始拍照...")
-            image_array, error_code = self._camera.grab_single()
+            image_array, error_code, _, _, cancelled = self._capture_single_with_flash_timing("单拍")
+            if cancelled:
+                logger.warning("拍照已取消")
+                return ProtocolBuilder.build_error_response(
+                    frame.command, ErrorCode.UNKNOWN_ERROR
+                )
 
             if image_array is None:
-                logger.error(f"拍照失败: 错误码 0x{error_code:04X}")
+                real_error = error_code or ErrorCode.CAMERA_GRAB_TIMEOUT
+                logger.error(f"拍照失败: 错误码 0x{real_error:04X}")
                 return ProtocolBuilder.build_error_response(
-                    frame.command, error_code
+                    frame.command, real_error
                 )
 
             #保存图像（使用numpy数组保存方法）
@@ -2062,42 +2136,53 @@ class TCPServer:
         return ProtocolBuilder.build_success_response(frame.command)
 
     def _continuous_capture_loop(self):
-        """连续拍照线程循环，每秒拍1张"""
+        """连续拍照线程循环。连拍周期由主触发（先发送的触发）决定。"""
         logger.info("连续拍照线程启动")
         capture_count = 0
 
         while not self._continuous_stop_event.is_set():
             try:
-                #执行拍照（复用现有逻辑）
-                image_array, error_code = self._camera.grab_single()
+                image_array, error_code, lead_ts, lead_source, cancelled = self._capture_single_with_flash_timing(
+                    scene=f"连拍#{capture_count + 1}",
+                    stop_event=self._continuous_stop_event
+                )
+                if cancelled:
+                    break
 
                 if image_array is None:
-                    logger.error(f"连续拍照失败: 错误码 0x{error_code:04X}")
-                    time.sleep(1.0)
-                    continue
-
-                #保存图像
-                success, result, save_error = self._image_processor.save_image_from_array(image_array)
-                if success:
-                    capture_count += 1
-                    logger.info(f"连续拍照成功 [{capture_count}]: {result}")
-
-                    #发送拍照完成通知
-                    if self._event_loop:
-                        filename = os.path.basename(result)
-                        notify_frame = ProtocolBuilder.build_capture_complete(filename)
-                        asyncio.run_coroutine_threadsafe(
-                            self.send_to_controller(notify_frame),
-                            self._event_loop
-                        )
+                    real_error = error_code or ErrorCode.CAMERA_GRAB_TIMEOUT
+                    logger.error(f"连续拍照失败: 错误码 0x{real_error:04X}")
                 else:
-                    logger.error(f"连续拍照保存失败: {result}")
+                    #保存图像
+                    success, result, save_error = self._image_processor.save_image_from_array(image_array)
+                    if success:
+                        capture_count += 1
+                        logger.info(f"连续拍照成功 [{capture_count}]: {result}")
+
+                        #发送拍照完成通知
+                        if self._event_loop:
+                            filename = os.path.basename(result)
+                            notify_frame = ProtocolBuilder.build_capture_complete(filename)
+                            asyncio.run_coroutine_threadsafe(
+                                self.send_to_controller(notify_frame),
+                                self._event_loop
+                            )
+                    else:
+                        logger.error(f"连续拍照保存失败: {result}")
+
+                # 下一次周期由主触发时间点决定，不等待从触发完成
+                next_cycle_ts = lead_ts + self.CONTINUOUS_INTERVAL_SEC
+                remaining = next_cycle_ts - time.monotonic()
+                if remaining > 0:
+                    self._continuous_stop_event.wait(timeout=remaining)
+                else:
+                    logger.debug(
+                        f"连拍周期已超时(主触发={lead_source})，立即进入下一周期，超时={-remaining:.3f}s"
+                    )
 
             except Exception as e:
                 logger.error(f"连续拍照异常: {e}")
-
-            #等待1秒
-            self._continuous_stop_event.wait(timeout=1.0)
+                self._continuous_stop_event.wait(timeout=self.CONTINUOUS_INTERVAL_SEC)
 
         logger.info(f"连续拍照线程结束，共拍摄 {capture_count} 张")
 
