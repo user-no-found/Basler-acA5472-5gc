@@ -21,7 +21,7 @@ from protocol_builder import (
     build_set_exposure, build_set_gain, build_set_white_balance,
     build_set_resolution,
     build_set_gain_auto, build_set_frame_rate, build_set_pixel_format,
-    build_set_flash, FLASH_BASE_DELAY_MS
+    build_set_flash
 )
 from error_codes import get_error_message
 
@@ -388,7 +388,7 @@ class ControlPanel(ttk.Frame):
 
     def _create_flash_section(self):
         """创建闪光灯控制区域"""
-        frame = ttk.LabelFrame(self, text="闪光灯控制（Line2 + Timer1Active）", padding="5")
+        frame = ttk.LabelFrame(self, text="闪光灯控制（TCP触发）", padding="5")
         frame.pack(fill=tk.X, pady=(0, 5))
 
         enable_frame = ttk.Frame(frame)
@@ -403,13 +403,13 @@ class ControlPanel(ttk.Frame):
 
         delay_frame = ttk.Frame(frame)
         delay_frame.pack(fill=tk.X, pady=2)
-        ttk.Label(delay_frame, text="追加延时(ms):").pack(side=tk.LEFT)
+        ttk.Label(delay_frame, text="拍照延时(ms):").pack(side=tk.LEFT)
         self.flash_delay_var = tk.StringVar(value="0")
         self.flash_delay_entry = ttk.Entry(delay_frame, textvariable=self.flash_delay_var, width=10)
         self.flash_delay_entry.pack(side=tk.LEFT, padx=(5, 0))
         ttk.Label(
             delay_frame,
-            text=f"(总延时 = 固定{FLASH_BASE_DELAY_MS}ms + 当前值)",
+            text="(先发AA AA，再等待该时长后拍照)",
             foreground="gray"
         ).pack(side=tk.LEFT, padx=(5, 0))
 
@@ -639,11 +639,10 @@ class ControlPanel(ttk.Frame):
             delay_ms = max(0, delay_ms)
         except ValueError:
             delay_ms = 0
-            self._show_input_warning("闪光追加延时(ms)", delay_str, delay_ms)
+            self._show_input_warning("闪光后拍照延时(ms)", delay_str, delay_ms)
 
         logger.info(
-            f"发送闪光灯设置: enable={enable}, extra_delay={delay_ms}ms, "
-            f"total={FLASH_BASE_DELAY_MS + delay_ms}ms"
+            f"发送闪光灯设置: enable={enable}, delay={delay_ms}ms"
         )
         self._send(
             build_set_flash(

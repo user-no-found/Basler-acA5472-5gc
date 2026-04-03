@@ -26,9 +26,6 @@ from loguru import logger
 FRAME_HEADER = b'\xFE\xFE'
 FRAME_FOOTER = b'\xEF\xEF'
 PROTOCOL_VERSION = 0x20  #v2.0
-FLASH_BASE_DELAY_MS = 1100
-
-
 #命令码定义 - 控制命令（上位机 → 客户端）
 class Command:
     """命令码常量"""
@@ -47,7 +44,7 @@ class Command:
     SET_GAIN_AUTO = 0x24    #设置自动增益
     SET_FRAME_RATE = 0x25   #设置帧率
     SET_PIXEL_FORMAT = 0x26 #设置像素格式
-    SET_FLASH = 0x27        #设置闪光灯（定时器触发）
+    SET_FLASH = 0x27        #设置闪光灯（TCP触发）
     QUERY_STATUS = 0x30     #查询状态
     QUERY_PARAMS = 0x31     #查询参数
     QUERY_RESOLUTIONS = 0x32  #查询支持的分辨率列表
@@ -352,8 +349,7 @@ def build_set_flash(enable: bool, delay_ms: int) -> bytes:
 
     Args:
         enable: 是否启用闪光输出
-        delay_ms: 用户追加延时（毫秒）
-                  实际总延时 = 固定1100ms + delay_ms
+        delay_ms: 闪光触发发送后，等待多久再触发相机拍照（毫秒）
 
     Returns:
         命令帧
