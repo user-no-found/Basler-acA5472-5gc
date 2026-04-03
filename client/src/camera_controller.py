@@ -493,22 +493,51 @@ class CameraController:
                 return False, ErrorCode.CAMERA_NOT_CONNECTED
 
             try:
-                #设置曝光模式
-                if hasattr(self._camera, 'ExposureAuto'):
-                    self._camera.ExposureAuto.SetValue(mode.value)
+                exposure_auto_node, exposure_auto_name = self._get_first_available_node(
+                    "ExposureAuto", "ExposureAutoRaw"
+                )
+                exposure_time_node, exposure_time_name = self._get_first_available_node(
+                    "ExposureTime", "ExposureTimeAbs"
+                )
 
-                #手动模式下设置曝光时间
+                if exposure_auto_node is not None:
+                    selected_mode = self._set_enum_node(exposure_auto_node, [mode.value])
+                    if selected_mode is None:
+                        error_msg = f"设置曝光模式失败：节点{exposure_auto_name}不支持{mode.value}"
+                        logger.error(error_msg)
+                        self._report_error(ErrorCode.CAMERA_PARAM_FAILED, error_msg)
+                        return False, ErrorCode.CAMERA_PARAM_FAILED
+                elif mode == ExposureMode.AUTO:
+                    error_msg = "相机缺少ExposureAuto节点，无法启用自动曝光"
+                    logger.error(error_msg)
+                    self._report_error(ErrorCode.CAMERA_PARAM_FAILED, error_msg)
+                    return False, ErrorCode.CAMERA_PARAM_FAILED
+
                 if mode == ExposureMode.MANUAL:
-                    #获取曝光范围
-                    min_exp = self._camera.ExposureTime.Min
-                    max_exp = self._camera.ExposureTime.Max
+                    if exposure_time_node is None:
+                        error_msg = "相机缺少ExposureTime节点，无法设置手动曝光"
+                        logger.error(error_msg)
+                        self._report_error(ErrorCode.CAMERA_PARAM_FAILED, error_msg)
+                        return False, ErrorCode.CAMERA_PARAM_FAILED
 
-                    #范围检查
+                    min_exp, max_exp = self._get_numeric_bounds(exposure_time_node)
+                    if min_exp is None or max_exp is None:
+                        error_msg = f"读取曝光范围失败({exposure_time_name})"
+                        logger.error(error_msg)
+                        self._report_error(ErrorCode.CAMERA_PARAM_FAILED, error_msg)
+                        return False, ErrorCode.CAMERA_PARAM_FAILED
+
                     if exposure_us < min_exp or exposure_us > max_exp:
                         logger.warning(f"曝光值{exposure_us}超出范围[{min_exp}, {max_exp}]，自动调整")
-                    exposure_us = max(min_exp, min(max_exp, exposure_us))
-                    self._camera.ExposureTime.SetValue(exposure_us)
-                    logger.info(f"曝光时间设置为: {exposure_us} us")
+
+                    set_ok, applied_exp = self._set_numeric_node(exposure_time_node, exposure_us)
+                    if not set_ok:
+                        error_msg = f"设置曝光值失败({exposure_time_name})"
+                        logger.error(error_msg)
+                        self._report_error(ErrorCode.CAMERA_PARAM_FAILED, error_msg)
+                        return False, ErrorCode.CAMERA_PARAM_FAILED
+
+                    logger.info(f"曝光时间设置为: {applied_exp} us ({exposure_time_name})")
 
                 return True, None
 
@@ -577,20 +606,41 @@ class CameraController:
                 return False, ErrorCode.CAMERA_NOT_CONNECTED
 
             try:
-                #关闭自动增益
-                if hasattr(self._camera, 'GainAuto'):
-                    self._camera.GainAuto.SetValue("Off")
+                gain_auto_node, gain_auto_name = self._get_first_available_node("GainAuto")
+                gain_node, gain_node_name = self._get_first_available_node("Gain", "GainRaw")
 
-                #获取增益范围
-                min_gain = self._camera.Gain.Min
-                max_gain = self._camera.Gain.Max
+                if gain_auto_node is not None:
+                    selected_mode = self._set_enum_node(gain_auto_node, ["Off"])
+                    if selected_mode is None:
+                        error_msg = f"关闭自动增益失败：节点{gain_auto_name}不支持Off"
+                        logger.error(error_msg)
+                        self._report_error(ErrorCode.CAMERA_PARAM_FAILED, error_msg)
+                        return False, ErrorCode.CAMERA_PARAM_FAILED
 
-                #范围检查
+                if gain_node is None:
+                    error_msg = "相机缺少Gain/GainRaw节点，无法设置增益"
+                    logger.error(error_msg)
+                    self._report_error(ErrorCode.CAMERA_PARAM_FAILED, error_msg)
+                    return False, ErrorCode.CAMERA_PARAM_FAILED
+
+                min_gain, max_gain = self._get_numeric_bounds(gain_node)
+                if min_gain is None or max_gain is None:
+                    error_msg = f"读取增益范围失败({gain_node_name})"
+                    logger.error(error_msg)
+                    self._report_error(ErrorCode.CAMERA_PARAM_FAILED, error_msg)
+                    return False, ErrorCode.CAMERA_PARAM_FAILED
+
                 if gain < min_gain or gain > max_gain:
                     logger.warning(f"增益值{gain}超出范围[{min_gain}, {max_gain}]，自动调整")
-                gain = max(min_gain, min(max_gain, gain))
-                self._camera.Gain.SetValue(gain)
-                logger.info(f"增益设置为: {gain}")
+
+                set_ok, applied_gain = self._set_numeric_node(gain_node, gain)
+                if not set_ok:
+                    error_msg = f"设置增益值失败({gain_node_name})"
+                    logger.error(error_msg)
+                    self._report_error(ErrorCode.CAMERA_PARAM_FAILED, error_msg)
+                    return False, ErrorCode.CAMERA_PARAM_FAILED
+
+                logger.info(f"增益设置为: {applied_gain} ({gain_node_name})")
                 return True, None
 
             except pylon.RuntimeException as e:
@@ -624,7 +674,8 @@ class CameraController:
                 self._report_error(ErrorCode.CAMERA_NOT_CONNECTED, error_msg)
                 return False, ErrorCode.CAMERA_NOT_CONNECTED
 
-            if not hasattr(self._camera, 'GainAuto'):
+            gain_auto_node, gain_auto_name = self._get_first_available_node("GainAuto")
+            if gain_auto_node is None:
                 error_msg = "相机不支持自动增益"
                 logger.warning(error_msg)
                 self._report_error(ErrorCode.CAMERA_PARAM_FAILED, error_msg)
@@ -632,8 +683,13 @@ class CameraController:
 
             try:
                 mode = "Continuous" if enabled else "Off"
-                self._camera.GainAuto.SetValue(mode)
-                logger.info(f"自动增益设置为: {mode}")
+                selected_mode = self._set_enum_node(gain_auto_node, [mode])
+                if selected_mode is None:
+                    error_msg = f"设置自动增益失败：节点{gain_auto_name}不支持{mode}"
+                    logger.error(error_msg)
+                    self._report_error(ErrorCode.CAMERA_PARAM_FAILED, error_msg)
+                    return False, ErrorCode.CAMERA_PARAM_FAILED
+                logger.info(f"自动增益设置为: {selected_mode} ({gain_auto_name})")
                 return True, None
 
             except pylon.RuntimeException as e:
@@ -672,39 +728,70 @@ class CameraController:
                 return False, ErrorCode.CAMERA_NOT_CONNECTED
 
             try:
-                #检查是否支持白平衡
-                if not hasattr(self._camera, 'BalanceWhiteAuto'):
+                white_auto_node, white_auto_name = self._get_first_available_node(
+                    "BalanceWhiteAuto", "BalanceWhiteAutoRaw"
+                )
+                ratio_selector_node, ratio_selector_name = self._get_first_available_node(
+                    "BalanceRatioSelector"
+                )
+                ratio_node, ratio_node_name = self._get_first_available_node(
+                    "BalanceRatio", "BalanceRatioAbs"
+                )
+
+                if white_auto_node is None:
                     logger.warning("相机不支持白平衡设置")
                     return False, ErrorCode.CAMERA_PARAM_FAILED
 
-                #设置白平衡模式
-                self._camera.BalanceWhiteAuto.SetValue(mode.value)
+                selected_mode = self._set_enum_node(white_auto_node, [mode.value])
+                if selected_mode is None:
+                    error_msg = f"设置白平衡模式失败：节点{white_auto_name}不支持{mode.value}"
+                    logger.error(error_msg)
+                    self._report_error(ErrorCode.CAMERA_PARAM_FAILED, error_msg)
+                    return False, ErrorCode.CAMERA_PARAM_FAILED
 
-                #手动模式下设置比例
                 if mode == WhiteBalanceMode.MANUAL:
-                    if hasattr(self._camera, 'BalanceRatioSelector'):
-                        #获取白平衡比例范围
-                        min_ratio = self._camera.BalanceRatio.Min
-                        max_ratio = self._camera.BalanceRatio.Max
+                    if ratio_selector_node is None or ratio_node is None:
+                        error_msg = "相机缺少BalanceRatio相关节点，无法设置手动白平衡"
+                        logger.error(error_msg)
+                        self._report_error(ErrorCode.CAMERA_PARAM_FAILED, error_msg)
+                        return False, ErrorCode.CAMERA_PARAM_FAILED
 
-                        #设置红色通道
-                        self._camera.BalanceRatioSelector.SetValue("Red")
-                        red_ratio = max(min_ratio, min(max_ratio, red_ratio))
-                        self._camera.BalanceRatio.SetValue(red_ratio)
+                    min_ratio, max_ratio = self._get_numeric_bounds(ratio_node)
+                    if min_ratio is None or max_ratio is None:
+                        error_msg = f"读取白平衡范围失败({ratio_node_name})"
+                        logger.error(error_msg)
+                        self._report_error(ErrorCode.CAMERA_PARAM_FAILED, error_msg)
+                        return False, ErrorCode.CAMERA_PARAM_FAILED
 
-                        #设置绿色通道
-                        self._camera.BalanceRatioSelector.SetValue("Green")
-                        green_ratio = max(min_ratio, min(max_ratio, green_ratio))
-                        self._camera.BalanceRatio.SetValue(green_ratio)
+                    for selector_value, channel_ratio in (
+                        ("Red", red_ratio),
+                        ("Green", green_ratio),
+                        ("Blue", blue_ratio),
+                    ):
+                        selected_channel = self._set_enum_node(ratio_selector_node, [selector_value])
+                        if selected_channel is None:
+                            error_msg = (
+                                f"设置白平衡通道失败：节点{ratio_selector_name}不支持{selector_value}"
+                            )
+                            logger.error(error_msg)
+                            self._report_error(ErrorCode.CAMERA_PARAM_FAILED, error_msg)
+                            return False, ErrorCode.CAMERA_PARAM_FAILED
 
-                        #设置蓝色通道
-                        self._camera.BalanceRatioSelector.SetValue("Blue")
-                        blue_ratio = max(min_ratio, min(max_ratio, blue_ratio))
-                        self._camera.BalanceRatio.SetValue(blue_ratio)
+                        if channel_ratio < min_ratio or channel_ratio > max_ratio:
+                            logger.warning(
+                                f"白平衡{selector_value}值{channel_ratio}超出范围[{min_ratio}, {max_ratio}]，自动调整"
+                            )
+                        set_ok, applied_ratio = self._set_numeric_node(ratio_node, channel_ratio)
+                        if not set_ok:
+                            error_msg = f"设置白平衡比例失败({ratio_node_name}, {selector_value})"
+                            logger.error(error_msg)
+                            self._report_error(ErrorCode.CAMERA_PARAM_FAILED, error_msg)
+                            return False, ErrorCode.CAMERA_PARAM_FAILED
+                        logger.info(
+                            f"白平衡通道设置为: {selected_channel}={applied_ratio:.2f} ({ratio_node_name})"
+                        )
 
-                        logger.info(f"白平衡设置为: R={red_ratio:.2f}, G={green_ratio:.2f}, B={blue_ratio:.2f}")
-
-                logger.info(f"白平衡模式设置为: {mode.name}")
+                logger.info(f"白平衡模式设置为: {mode.name} ({white_auto_name})")
                 return True, None
 
             except pylon.RuntimeException as e:
@@ -1006,6 +1093,21 @@ class CameraController:
 
         return False, target
 
+    def _get_numeric_bounds(self, node) -> Tuple[Optional[float], Optional[float]]:
+        """
+        获取数值节点上下界
+
+        Args:
+            node: pylon数值节点
+
+        Returns:
+            Tuple[Optional[float], Optional[float]]: (最小值, 最大值)
+        """
+        try:
+            return float(node.Min), float(node.Max)
+        except Exception:
+            return None, None
+
     def _set_user_output(self, enabled: bool) -> bool:
         """
         设置UserOutput1电平（作为LineSource降级兜底）
@@ -1098,6 +1200,34 @@ class CameraController:
                     self._report_error(ErrorCode.CAMERA_PARAM_FAILED, error_msg)
                     return False, ErrorCode.CAMERA_PARAM_FAILED
 
+                min_delay, max_delay = self._get_numeric_bounds(timer_delay_node)
+                min_duration, max_duration = self._get_numeric_bounds(timer_duration_node)
+                if min_delay is not None and max_delay is not None:
+                    logger.info(
+                        f"TimerDelay范围: [{min_delay:.1f}, {max_delay:.1f}] ({timer_delay_name}), "
+                        f"请求值={delay_us}"
+                    )
+                    if delay_us < min_delay or delay_us > max_delay:
+                        error_msg = (
+                            f"请求的闪光延时{delay_us}us超出相机范围[{min_delay}, {max_delay}]"
+                        )
+                        logger.error(error_msg)
+                        self._report_error(ErrorCode.CAMERA_PARAM_FAILED, error_msg)
+                        return False, ErrorCode.CAMERA_PARAM_FAILED
+
+                if min_duration is not None and max_duration is not None:
+                    logger.info(
+                        f"TimerDuration范围: [{min_duration:.1f}, {max_duration:.1f}] "
+                        f"({timer_duration_name}), 请求值={duration_us}"
+                    )
+                    if duration_us < min_duration or duration_us > max_duration:
+                        error_msg = (
+                            f"请求的闪光脉宽{duration_us}us超出相机范围[{min_duration}, {max_duration}]"
+                        )
+                        logger.error(error_msg)
+                        self._report_error(ErrorCode.CAMERA_PARAM_FAILED, error_msg)
+                        return False, ErrorCode.CAMERA_PARAM_FAILED
+
                 delay_ok, real_delay = self._set_numeric_node(timer_delay_node, delay_us)
                 duration_ok, real_duration = self._set_numeric_node(timer_duration_node, duration_us)
                 if not delay_ok or not duration_ok:
@@ -1122,8 +1252,17 @@ class CameraController:
                                 )
                                 interval_applied = selected_trigger is not None
 
+                selected_trigger = None
                 if trigger_source_node and not interval_applied:
-                    self._set_enum_node(trigger_source_node, ["ExposureStart", "FrameStart", "AcquisitionStart"])
+                    selected_trigger = self._set_enum_node(
+                        trigger_source_node,
+                        ["ExposureStart", "FrameStart", "AcquisitionStart"]
+                    )
+                    if selected_trigger is None:
+                        error_msg = "相机不支持ExposureStart/FrameStart/AcquisitionStart定时器触发源"
+                        logger.error(error_msg)
+                        self._report_error(ErrorCode.CAMERA_PARAM_FAILED, error_msg)
+                        return False, ErrorCode.CAMERA_PARAM_FAILED
 
                 if line_source_node:
                     line_source = self._set_enum_node(line_source_node, ["Timer1Active", "TimerActive"])
@@ -1145,9 +1284,21 @@ class CameraController:
                 if interval_us > 0 and not interval_applied:
                     logger.warning("当前机型未提供PeriodicSignal节点，间隔参数已忽略，仅按延时/脉宽生效")
 
+                try:
+                    actual_delay = float(timer_delay_node.Value)
+                except Exception:
+                    actual_delay = real_delay
+
+                try:
+                    actual_duration = float(timer_duration_node.Value)
+                except Exception:
+                    actual_duration = real_duration
+
                 logger.info(
-                    f"闪光灯配置完成: enable={enable}, delay={real_delay:.1f}us({timer_delay_name}), "
-                    f"duration={real_duration:.1f}us({timer_duration_name}), interval={interval_us}us"
+                    f"闪光灯配置完成: enable={enable}, delay={actual_delay:.1f}us({timer_delay_name}), "
+                    f"duration={actual_duration:.1f}us({timer_duration_name}), "
+                    f"trigger={selected_trigger or 'PeriodicSignal'}, line_source={line_source}, "
+                    f"interval={interval_us}us"
                 )
                 return True, None
 
@@ -1402,7 +1553,13 @@ class CameraController:
                 return (0, 0)
 
             try:
-                return (self._camera.Gain.Min, self._camera.Gain.Max)
+                gain_node, _ = self._get_first_available_node("Gain", "GainRaw")
+                if gain_node is None:
+                    return (0, 0)
+                min_gain, max_gain = self._get_numeric_bounds(gain_node)
+                if min_gain is None or max_gain is None:
+                    return (0, 0)
+                return (min_gain, max_gain)
             except Exception as e:
                 logger.error(f"获取增益范围失败: {e}")
                 return (0, 0)
