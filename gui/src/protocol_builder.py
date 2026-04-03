@@ -26,6 +26,7 @@ from loguru import logger
 FRAME_HEADER = b'\xFE\xFE'
 FRAME_FOOTER = b'\xEF\xEF'
 PROTOCOL_VERSION = 0x20  #v2.0
+FLASH_BASE_DELAY_MS = 60100
 
 
 #命令码定义 - 控制命令（上位机 → 客户端）
@@ -46,7 +47,7 @@ class Command:
     SET_GAIN_AUTO = 0x24    #设置自动增益
     SET_FRAME_RATE = 0x25   #设置帧率
     SET_PIXEL_FORMAT = 0x26 #设置像素格式
-    SET_FLASH = 0x27        #设置闪光灯（TCP触发）
+    SET_FLASH = 0x27        #设置闪光灯（定时器触发）
     QUERY_STATUS = 0x30     #查询状态
     QUERY_PARAMS = 0x31     #查询参数
     QUERY_RESOLUTIONS = 0x32  #查询支持的分辨率列表
@@ -351,13 +352,13 @@ def build_set_flash(enable: bool, delay_ms: int) -> bytes:
 
     Args:
         enable: 是否启用闪光输出
-        delay_ms: 闪光触发相对相机触发的延时（毫秒，有符号）
-                  正值=相机先触发；负值=闪光先触发
+        delay_ms: 用户追加延时（毫秒）
+                  实际总延时 = 固定60100ms + delay_ms
 
     Returns:
         命令帧
     """
-    delay_ms = int(delay_ms)
+    delay_ms = max(0, int(delay_ms))
     data = bytes([1 if enable else 0])
     data += struct.pack('>i', delay_ms)
     return build_frame(Command.SET_FLASH, data)

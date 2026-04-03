@@ -19,7 +19,6 @@ TCP服务器模块
 import asyncio
 import struct
 import os
-import socket
 import threading
 import time
 from typing import Dict, Optional, Callable, Awaitable, Any, TYPE_CHECKING
@@ -103,11 +102,9 @@ class TCPServer:
     PROTOCOL_FPS_MAX = 255
     RECORD_PREVIEW_JPEG_QUALITY = 80
     RECORD_PREVIEW_MAX_EDGE = 960
-    # 外部闪光灯触发（固定TCP目标）
-    FLASH_TRIGGER_HOST = "192.168.201"
-    FLASH_TRIGGER_PORT = 3000
-    FLASH_TRIGGER_TIMEOUT_SEC = 0.2
-    FLASH_TRIGGER_PAYLOAD = b"\x00"
+    # 相机定时器闪光参数
+    FLASH_TIMER_BASE_DELAY_MS = 60100
+    FLASH_TIMER_PULSE_US = 1000
     # 连拍周期（秒）
     CONTINUOUS_INTERVAL_SEC = 1.0
 
@@ -173,10 +170,9 @@ class TCPServer:
         # 保存用户最新配置；录像/预览期间仅缓存，退出后恢复
         self._flash_user_config = {
             "enable": False,
-            "delay_ms": 0,  # 支持负值：负值表示闪光先触发
+            "extra_delay_ms": 0,
         }
         self._flash_forced_disabled = False
-        self._flash_trigger_lock = threading.Lock()
 
         #录像相关
         self._recording_task: Optional[asyncio.Task] = None
@@ -932,12 +928,12 @@ class TCPServer:
         """
         处理闪光灯设置命令(0x27)
 
-        新格式: [启用1字节][延时4字节(有符号ms, 大端)]
+        新格式: [启用1字节][追加延时4字节(ms, 大端)]
         - 启用: 0-关闭, 1-开启
-        - 延时: 支持负值；正值=相机先触发，负值=闪光先触发
+        - 追加延时: 在固定基准延时上叠加，实际总延时 = 60100ms + 追加延时
 
         兼容旧格式(13字节): [启用1字节][延时4字节us][脉宽4字节][间隔4字节]
-        - 旧格式的脉宽/间隔字段会被忽略，仅将delay_us转换为delay_ms。
+        - 旧格式的脉宽/间隔字段会被忽略，仅将delay_us转换为追加延时(ms)。
         """
         if len(frame.data) not in (5, 13):
             logger.warning(
@@ -950,24 +946,33 @@ class TCPServer:
         try:
             enable = frame.data[0] == 1
             if len(frame.data) == 5:
-                delay_ms = struct.unpack('>i', frame.data[1:5])[0]
+                extra_delay_ms = struct.unpack('>i', frame.data[1:5])[0]
             else:
                 delay_us = struct.unpack('>I', frame.data[1:5])[0]
-                delay_ms = int(delay_us / 1000)
+                extra_delay_ms = int(delay_us / 1000)
                 logger.warning(
-                    "收到旧版闪光灯协议(13字节)，已按delay_us转换为delay_ms；脉宽/间隔字段已忽略"
+                    "收到旧版闪光灯协议(13字节)，已按delay_us转换为追加延时(ms)；脉宽/间隔字段已忽略"
                 )
+
+            if extra_delay_ms < 0:
+                logger.warning(f"追加延时不支持负值，已按0处理: {extra_delay_ms}ms")
+                extra_delay_ms = 0
 
             # 先缓存用户配置。录像/预览期间只缓存，退出后恢复。
             self._flash_user_config = {
                 "enable": bool(enable),
-                "delay_ms": int(delay_ms),
+                "extra_delay_ms": int(extra_delay_ms),
             }
 
-            logger.info(f"设置闪光灯(TCP触发): enable={enable}, delay={delay_ms}ms")
-            if abs(delay_ms) >= int(self.CONTINUOUS_INTERVAL_SEC * 1000):
+            total_delay_ms = self.FLASH_TIMER_BASE_DELAY_MS + int(extra_delay_ms)
+            logger.info(
+                f"设置闪光灯(相机定时器触发): enable={enable}, "
+                f"base={self.FLASH_TIMER_BASE_DELAY_MS}ms, extra={extra_delay_ms}ms, "
+                f"total={total_delay_ms}ms"
+            )
+            if enable and total_delay_ms >= int(self.CONTINUOUS_INTERVAL_SEC * 1000):
                 logger.warning(
-                    "闪光延时绝对值大于等于连拍周期，连拍时会出现跨周期交错触发"
+                    "闪光总延时大于等于连拍周期，连拍时可能出现跨周期交错触发"
                 )
 
             if self._is_streaming_active():
@@ -975,6 +980,11 @@ class TCPServer:
                 return ProtocolBuilder.build_success_response(frame.command)
 
             self._flash_forced_disabled = False
+            flash_ok, flash_err = self._apply_flash_config()
+            if not flash_ok:
+                return ProtocolBuilder.build_error_response(
+                    frame.command, flash_err or ErrorCode.CAMERA_PARAM_FAILED
+                )
             return ProtocolBuilder.build_success_response(frame.command)
         except Exception as e:
             logger.error(f"设置闪光灯异常: {e}")
@@ -1220,62 +1230,38 @@ class TCPServer:
         return self._is_recording or self._is_previewing
 
     def _is_flash_output_enabled(self) -> bool:
-        """当前是否允许发送闪光触发（受用户配置和录像/预览强制禁用状态影响）"""
+        """当前是否应启用相机闪光输出（受用户配置和录像/预览强制禁用状态影响）"""
         if self._flash_forced_disabled:
             return False
         return bool(self._flash_user_config.get("enable", False))
 
-    def _send_flash_trigger(self, scene: str) -> bool:
+    def _apply_flash_config(self) -> tuple[bool, Optional[int]]:
         """
-        通过TCP发送闪光触发（单字节0x00）
+        将当前缓存的闪光配置下发到相机定时器(Line2 + Timer1Active)
         """
-        if not self._is_flash_output_enabled():
-            logger.debug(f"跳过闪光触发（当前禁用）: {scene}")
-            return False
+        if self._camera is None or not self._camera.is_connected:
+            logger.warning("下发闪光灯配置失败: 相机未连接")
+            return False, ErrorCode.CAMERA_NOT_CONNECTED
 
-        try:
-            with self._flash_trigger_lock:
-                with socket.create_connection(
-                    (self.FLASH_TRIGGER_HOST, self.FLASH_TRIGGER_PORT),
-                    timeout=self.FLASH_TRIGGER_TIMEOUT_SEC
-                ) as sock:
-                    sock.sendall(self.FLASH_TRIGGER_PAYLOAD)
+        enable_output = self._is_flash_output_enabled()
+        extra_delay_ms = max(0, int(self._flash_user_config.get("extra_delay_ms", 0)))
+        total_delay_us = 0
+        if enable_output:
+            total_delay_us = (self.FLASH_TIMER_BASE_DELAY_MS + extra_delay_ms) * 1000
+
+        success, error_code = self._camera.set_flash_l2_timer(
+            enable=enable_output,
+            delay_us=total_delay_us,
+            duration_us=self.FLASH_TIMER_PULSE_US,
+            interval_us=0,
+        )
+        if success:
             logger.info(
-                f"闪光触发已发送: target={self.FLASH_TRIGGER_HOST}:{self.FLASH_TRIGGER_PORT}, scene={scene}"
+                f"闪光灯配置已下发(Line2 + Timer1Active): enable={enable_output}, "
+                f"base={self.FLASH_TIMER_BASE_DELAY_MS}ms, extra={extra_delay_ms}ms, "
+                f"total={total_delay_us / 1000:.1f}ms, pulse={self.FLASH_TIMER_PULSE_US}us"
             )
-            return True
-        except Exception as e:
-            logger.warning(
-                f"闪光触发发送失败: target={self.FLASH_TRIGGER_HOST}:{self.FLASH_TRIGGER_PORT}, "
-                f"scene={scene}, error={e}"
-            )
-            return False
-
-    def _schedule_flash_trigger(
-        self,
-        delay_sec: float,
-        scene: str,
-        stop_event: Optional[threading.Event] = None
-    ) -> None:
-        """
-        延时发送闪光触发。用于“相机先触发、闪光后触发”的路径，避免阻塞主拍照流程。
-        """
-        safe_delay = max(0.0, float(delay_sec))
-
-        def _worker():
-            if safe_delay > 0:
-                if stop_event is not None:
-                    if stop_event.wait(timeout=safe_delay):
-                        return
-                else:
-                    time.sleep(safe_delay)
-            self._send_flash_trigger(scene)
-
-        threading.Thread(
-            target=_worker,
-            daemon=True,
-            name="FlashTriggerDelayed"
-        ).start()
+        return success, error_code
 
     def _capture_single_with_flash_timing(
         self,
@@ -1289,39 +1275,16 @@ class TCPServer:
             (image_array, error_code, lead_ts, lead_source, cancelled)
             lead_source: "camera" 或 "flash"
         """
-        delay_ms = int(self._flash_user_config.get("delay_ms", 0))
-        flash_enabled = self._is_flash_output_enabled()
-
-        # 闪光未启用时，直接由相机触发抓图
-        if not flash_enabled:
-            lead_ts = time.monotonic()
-            logger.debug(f"{scene}: 主触发=相机(闪光未启用)")
-            image_array, error_code = self._camera.grab_single()
-            return image_array, error_code, lead_ts, "camera", False
-
-        # delay<0: 闪光先触发，再过|delay|后相机触发
-        if delay_ms < 0:
-            lead_ts = time.monotonic()
-            wait_sec = abs(delay_ms) / 1000.0
-            logger.info(f"{scene}: 主触发=闪光, 跟随触发=相机, 偏移={wait_sec:.3f}s")
-            self._send_flash_trigger(f"{scene}-lead-flash")
-            if wait_sec > 0:
-                if stop_event is not None and stop_event.wait(timeout=wait_sec):
-                    return None, None, lead_ts, "flash", True
-                if stop_event is None:
-                    time.sleep(wait_sec)
-            image_array, error_code = self._camera.grab_single()
-            return image_array, error_code, lead_ts, "flash", False
-
-        # delay>=0: 相机先触发，闪光延时触发（异步发送，避免阻塞拍照）
         lead_ts = time.monotonic()
-        delay_sec = delay_ms / 1000.0
-        logger.info(f"{scene}: 主触发=相机, 跟随触发=闪光, 偏移={delay_sec:.3f}s")
-        self._schedule_flash_trigger(
-            delay_sec=delay_sec,
-            scene=f"{scene}-follow-flash",
-            stop_event=stop_event
-        )
+        extra_delay_ms = int(self._flash_user_config.get("extra_delay_ms", 0))
+        total_delay_ms = self.FLASH_TIMER_BASE_DELAY_MS + max(0, extra_delay_ms)
+        if self._is_flash_output_enabled():
+            logger.info(
+                f"{scene}: 使用相机定时器闪光触发, total_delay={total_delay_ms}ms, "
+                f"pulse={self.FLASH_TIMER_PULSE_US}us"
+            )
+        else:
+            logger.debug(f"{scene}: 相机直接抓图(闪光未启用)")
         image_array, error_code = self._camera.grab_single()
         return image_array, error_code, lead_ts, "camera", False
 
@@ -1333,7 +1296,11 @@ class TCPServer:
             return True, None
 
         self._flash_forced_disabled = True
-        logger.info(f"{scene}开始前已禁用闪光触发（TCP触发门禁）")
+        success, error_code = self._apply_flash_config()
+        if not success:
+            return False, error_code
+
+        logger.info(f"{scene}开始前已禁用闪光触发（Line2输出关闭）")
         return True, None
 
     def _restore_flash_after_streaming(self, scene: str) -> tuple[bool, Optional[int]]:
@@ -1346,9 +1313,15 @@ class TCPServer:
         if not self._flash_forced_disabled:
             return True, None
 
-        # TCP触发模式下只恢复逻辑门禁，不需要向相机下发Line2配置。
         self._flash_forced_disabled = False
-        logger.info(f"{scene}结束后已恢复闪光触发状态: enable={self._flash_user_config.get('enable', False)}")
+        success, error_code = self._apply_flash_config()
+        if not success:
+            return False, error_code
+
+        logger.info(
+            f"{scene}结束后已恢复闪光触发状态: enable={self._flash_user_config.get('enable', False)}, "
+            f"extra_delay={self._flash_user_config.get('extra_delay_ms', 0)}ms"
+        )
         return True, None
 
     async def _send_to_client(self, client: ClientInfo, data: bytes):
