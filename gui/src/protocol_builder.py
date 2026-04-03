@@ -26,7 +26,7 @@ from loguru import logger
 FRAME_HEADER = b'\xFE\xFE'
 FRAME_FOOTER = b'\xEF\xEF'
 PROTOCOL_VERSION = 0x20  #v2.0
-FLASH_BASE_DELAY_MS = 60100
+FLASH_BASE_DELAY_MS = 1100
 
 
 #命令码定义 - 控制命令（上位机 → 客户端）
@@ -353,7 +353,7 @@ def build_set_flash(enable: bool, delay_ms: int) -> bytes:
     Args:
         enable: 是否启用闪光输出
         delay_ms: 用户追加延时（毫秒）
-                  实际总延时 = 固定60100ms + delay_ms
+                  实际总延时 = 固定1100ms + delay_ms
 
     Returns:
         命令帧

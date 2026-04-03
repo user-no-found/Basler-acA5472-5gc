@@ -499,6 +499,18 @@ class ControlPanel(ttk.Frame):
         logger.warning(f"{field_name}: {msg}")
         messagebox.showwarning("输入验证警告", f"{field_name}: {msg}")
 
+    def _widget_has_focus(self, widget) -> bool:
+        """
+        判断指定控件或其内部子控件当前是否拥有焦点
+        """
+        try:
+            focused = self.focus_get()
+            if focused is None:
+                return False
+            return str(focused).startswith(str(widget))
+        except Exception:
+            return False
+
     def _clamp_fps(self, fps: float) -> float:
         """按当前帧率范围裁剪输入值"""
         return max(float(self._fps_min), min(float(self._fps_max), float(fps)))
@@ -814,10 +826,18 @@ class ControlPanel(ttk.Frame):
             fps: 帧率值（None表示不更新）
             pixel_format_index: 像素格式索引（None表示不更新）
         """
-        self.exposure_mode_var.set("自动" if exposure_mode == 0 else "手动")
-        self.exposure_value_var.set(str(exposure_value))
-        self.gain_var.set(str(gain))
-        self.wb_mode_var.set("自动" if wb_mode == 0 else "手动")
+        if not self._widget_has_focus(self.exposure_value_entry):
+            self.exposure_value_var.set(str(exposure_value))
+        if not self._widget_has_focus(self.gain_entry):
+            self.gain_var.set(str(gain))
+        if not self._widget_has_focus(self.flash_delay_entry):
+            # 闪光延时当前未由参数回包携带，这里仅避免编辑中被其他回写逻辑覆盖。
+            pass
+
+        if not self._widget_has_focus(self.exposure_mode_combo):
+            self.exposure_mode_var.set("自动" if exposure_mode == 0 else "手动")
+        if not self._widget_has_focus(self.wb_mode_combo):
+            self.wb_mode_var.set("自动" if wb_mode == 0 else "手动")
 
         #更新自动增益
         if gain_auto is not None:
@@ -828,7 +848,7 @@ class ControlPanel(ttk.Frame):
         if fps_limit is not None:
             self.fps_limit_var.set(fps_limit)
             self._on_fps_limit_changed()
-        if fps is not None:
+        if fps is not None and not self._widget_has_focus(self.fps_spinbox):
             self.fps_var.set(str(fps))
 
         #更新像素格式

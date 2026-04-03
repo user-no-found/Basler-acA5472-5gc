@@ -103,7 +103,7 @@ class TCPServer:
     RECORD_PREVIEW_JPEG_QUALITY = 80
     RECORD_PREVIEW_MAX_EDGE = 960
     # 相机定时器闪光参数
-    FLASH_TIMER_BASE_DELAY_MS = 60100
+    FLASH_TIMER_BASE_DELAY_MS = 1100
     FLASH_TIMER_PULSE_US = 1000
     # 连拍周期（秒）
     CONTINUOUS_INTERVAL_SEC = 1.0
@@ -930,7 +930,7 @@ class TCPServer:
 
         新格式: [启用1字节][追加延时4字节(ms, 大端)]
         - 启用: 0-关闭, 1-开启
-        - 追加延时: 在固定基准延时上叠加，实际总延时 = 60100ms + 追加延时
+        - 追加延时: 在固定基准延时上叠加，实际总延时 = 1100ms + 追加延时
 
         兼容旧格式(13字节): [启用1字节][延时4字节us][脉宽4字节][间隔4字节]
         - 旧格式的脉宽/间隔字段会被忽略，仅将delay_us转换为追加延时(ms)。
