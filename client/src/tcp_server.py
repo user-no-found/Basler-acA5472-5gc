@@ -1131,7 +1131,18 @@ class TCPServer:
                 #曝光模式: "Off"=手动, "Continuous"=自动
                 exposure_mode = 0 if params.exposure_mode == "Continuous" else 1
                 exposure_us = int(params.exposure_time)
-                gain = int(params.gain * 100)
+                #增益值映射：将相机实际增益值映射回协议值(0-1000)
+                try:
+                    min_gain, max_gain = self._camera.get_gain_range()
+                    if min_gain is not None and max_gain is not None and max_gain > min_gain:
+                        #将实际增益值映射到0-1000范围
+                        gain = int((params.gain - min_gain) / (max_gain - min_gain) * 1000)
+                    else:
+                        #无法获取范围时，假设相机增益范围是0-10，直接乘以100
+                        gain = int(params.gain * 100)
+                except Exception as e:
+                    logger.debug(f"增益值映射失败: {e}, 使用默认映射")
+                    gain = int(params.gain * 100)
 
                 #白平衡模式
                 wb_mode = 0 if params.white_balance_mode == "Continuous" else 1
