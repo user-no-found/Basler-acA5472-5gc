@@ -57,8 +57,9 @@ class ExposureMode(Enum):
 
 class WhiteBalanceMode(Enum):
     """白平衡模式枚举"""
-    AUTO = "Continuous"   #自动白平衡
-    MANUAL = "Off"        #手动白平衡
+    CONTINUOUS = "Continuous"  #连续自动白平衡
+    ONCE = "Once"              #一次自动白平衡
+    OFF = "Off"                #关闭自动白平衡
 
 
 @dataclass
@@ -705,17 +706,13 @@ class CameraController:
                 self._report_error(ErrorCode.CAMERA_PARAM_FAILED, error_msg)
                 return False, ErrorCode.CAMERA_PARAM_FAILED
 
-    def set_white_balance(self, mode: WhiteBalanceMode = WhiteBalanceMode.AUTO,
-                          red_ratio: float = 1.0, green_ratio: float = 1.0,
-                          blue_ratio: float = 1.0) -> Tuple[bool, Optional[int]]:
+    def set_white_balance(self, mode: WhiteBalanceMode = WhiteBalanceMode.CONTINUOUS
+                          ) -> Tuple[bool, Optional[int]]:
         """
         设置白平衡
 
         Args:
-            mode: 白平衡模式
-            red_ratio: 红色通道比例（手动模式）
-            green_ratio: 绿色通道比例（手动模式）
-            blue_ratio: 蓝色通道比例（手动模式）
+            mode: 白平衡模式 (CONTINUOUS/ONCE/OFF)
 
         Returns:
             Tuple[bool, Optional[int]]: (是否设置成功, 错误码或None)
@@ -731,12 +728,6 @@ class CameraController:
                 white_auto_node, white_auto_name = self._get_first_available_node(
                     "BalanceWhiteAuto", "BalanceWhiteAutoRaw"
                 )
-                ratio_selector_node, ratio_selector_name = self._get_first_available_node(
-                    "BalanceRatioSelector"
-                )
-                ratio_node, ratio_node_name = self._get_first_available_node(
-                    "BalanceRatio", "BalanceRatioAbs"
-                )
 
                 if white_auto_node is None:
                     logger.warning("相机不支持白平衡设置")
@@ -748,48 +739,6 @@ class CameraController:
                     logger.error(error_msg)
                     self._report_error(ErrorCode.CAMERA_PARAM_FAILED, error_msg)
                     return False, ErrorCode.CAMERA_PARAM_FAILED
-
-                if mode == WhiteBalanceMode.MANUAL:
-                    if ratio_selector_node is None or ratio_node is None:
-                        error_msg = "相机缺少BalanceRatio相关节点，无法设置手动白平衡"
-                        logger.error(error_msg)
-                        self._report_error(ErrorCode.CAMERA_PARAM_FAILED, error_msg)
-                        return False, ErrorCode.CAMERA_PARAM_FAILED
-
-                    min_ratio, max_ratio = self._get_numeric_bounds(ratio_node)
-                    if min_ratio is None or max_ratio is None:
-                        error_msg = f"读取白平衡范围失败({ratio_node_name})"
-                        logger.error(error_msg)
-                        self._report_error(ErrorCode.CAMERA_PARAM_FAILED, error_msg)
-                        return False, ErrorCode.CAMERA_PARAM_FAILED
-
-                    for selector_value, channel_ratio in (
-                        ("Red", red_ratio),
-                        ("Green", green_ratio),
-                        ("Blue", blue_ratio),
-                    ):
-                        selected_channel = self._set_enum_node(ratio_selector_node, [selector_value])
-                        if selected_channel is None:
-                            error_msg = (
-                                f"设置白平衡通道失败：节点{ratio_selector_name}不支持{selector_value}"
-                            )
-                            logger.error(error_msg)
-                            self._report_error(ErrorCode.CAMERA_PARAM_FAILED, error_msg)
-                            return False, ErrorCode.CAMERA_PARAM_FAILED
-
-                        if channel_ratio < min_ratio or channel_ratio > max_ratio:
-                            logger.warning(
-                                f"白平衡{selector_value}值{channel_ratio}超出范围[{min_ratio}, {max_ratio}]，自动调整"
-                            )
-                        set_ok, applied_ratio = self._set_numeric_node(ratio_node, channel_ratio)
-                        if not set_ok:
-                            error_msg = f"设置白平衡比例失败({ratio_node_name}, {selector_value})"
-                            logger.error(error_msg)
-                            self._report_error(ErrorCode.CAMERA_PARAM_FAILED, error_msg)
-                            return False, ErrorCode.CAMERA_PARAM_FAILED
-                        logger.info(
-                            f"白平衡通道设置为: {selected_channel}={applied_ratio:.2f} ({ratio_node_name})"
-                        )
 
                 logger.info(f"白平衡模式设置为: {mode.name} ({white_auto_name})")
                 return True, None

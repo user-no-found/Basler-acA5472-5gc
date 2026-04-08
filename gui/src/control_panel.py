@@ -327,11 +327,11 @@ class ControlPanel(ttk.Frame):
         wb_frame.pack(fill=tk.X, pady=2)
 
         ttk.Label(wb_frame, text="白平衡:").pack(side=tk.LEFT)
-        self.wb_mode_var = tk.StringVar(value="自动")
+        self.wb_mode_var = tk.StringVar(value="连续")
         self.wb_mode_combo = ttk.Combobox(
             wb_frame,
             textvariable=self.wb_mode_var,
-            values=["自动", "手动"],
+            values=["连续", "一次", "关闭"],
             state="readonly",
             width=8
         )
@@ -604,8 +604,15 @@ class ControlPanel(ttk.Frame):
             self._send(build_set_gain(value=gain))
 
         #白平衡设置
-        wb_mode = 0 if self.wb_mode_var.get() == "自动" else 1
-        logger.info(f"发送白平衡设置: mode={wb_mode}")
+        # 0=连续(Continuous), 1=一次(Once), 2=关闭(Off)
+        wb_mode_str = self.wb_mode_var.get()
+        if wb_mode_str == "连续":
+            wb_mode = 0
+        elif wb_mode_str == "一次":
+            wb_mode = 1
+        else:  # 关闭
+            wb_mode = 2
+        logger.info(f"发送白平衡设置: mode={wb_mode} ({wb_mode_str})")
         self._send(build_set_white_balance(mode=wb_mode))
 
         #帧率设置

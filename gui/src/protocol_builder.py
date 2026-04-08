@@ -238,20 +238,17 @@ def build_set_exposure(mode: int, value: int) -> bytes:
     return build_frame(Command.SET_EXPOSURE, data)
 
 
-def build_set_white_balance(mode: int, r: int = 0, g: int = 0, b: int = 0) -> bytes:
+def build_set_white_balance(mode: int) -> bytes:
     """
     构建设置白平衡命令帧
 
     Args:
-        mode: 模式（0-自动, 1-手动）
-        r: 红色增益
-        g: 绿色增益
-        b: 蓝色增益
+        mode: 模式（0-连续(Continuous), 1-一次(Once), 2-关闭(Off)）
 
     Returns:
         命令帧
     """
-    data = bytes([mode]) + struct.pack('>HHH', r, g, b)
+    data = bytes([mode])
     return build_frame(Command.SET_WHITE_BALANCE, data)
 
 

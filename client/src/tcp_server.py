@@ -680,9 +680,8 @@ class TCPServer:
         """
         处理白平衡设置命令(0x21)
 
-        数据格式: [模式(1字节)][R(2字节)][G(2字节)][B(2字节)]
-        - 模式: 0-自动, 1-手动
-        - R/G/B: 白平衡比例值（0-1000映射到0.0-10.0），大端序
+        数据格式: [模式(1字节)]
+        - 模式: 0-连续(Continuous), 1-一次(Once), 2-关闭(Off)
 
         Args:
             client: 客户端信息
@@ -699,43 +698,35 @@ class TCPServer:
             )
 
         #检查数据长度
-        if len(frame.data) < 7:
-            logger.warning(f"设置白平衡失败: 数据长度不足，期望7字节，实际{len(frame.data)}字节")
+        if len(frame.data) < 1:
+            logger.warning(f"设置白平衡失败: 数据长度不足，期望1字节，实际{len(frame.data)}字节")
             return ProtocolBuilder.build_error_response(
                 frame.command, ErrorCode.DATA_LENGTH_ERROR
             )
 
         try:
             #解析数据
-            mode = frame.data[0]  #0-自动, 1-手动
-            r_value = struct.unpack('>H', frame.data[1:3])[0]  #大端序2字节
-            g_value = struct.unpack('>H', frame.data[3:5])[0]
-            b_value = struct.unpack('>H', frame.data[5:7])[0]
-
-            #将0-1000映射到0.0-10.0的比例值
-            r_ratio = r_value / 100.0
-            g_ratio = g_value / 100.0
-            b_ratio = b_value / 100.0
-
-            logger.info(f"设置白平衡: 模式={mode}, R={r_ratio:.2f}, G={g_ratio:.2f}, B={b_ratio:.2f}")
+            mode = frame.data[0]  #0-连续, 1-一次, 2-关闭
 
             #导入白平衡模式枚举
             from camera_controller import WhiteBalanceMode
 
             if mode == 0:
-                #自动白平衡
-                success, error_code = self._camera.set_white_balance(WhiteBalanceMode.AUTO)
+                #连续自动白平衡
+                logger.info("设置白平衡: 模式=连续(Continuous)")
+                success, error_code = self._camera.set_white_balance(WhiteBalanceMode.CONTINUOUS)
+            elif mode == 1:
+                #一次自动白平衡
+                logger.info("设置白平衡: 模式=一次(Once)")
+                success, error_code = self._camera.set_white_balance(WhiteBalanceMode.ONCE)
             else:
-                #手动白平衡
-                success, error_code = self._camera.set_white_balance(
-                    WhiteBalanceMode.MANUAL,
-                    red_ratio=r_ratio,
-                    green_ratio=g_ratio,
-                    blue_ratio=b_ratio
-                )
+                #关闭自动白平衡（使用当前值或默认值）
+                logger.info("设置白平衡: 模式=关闭(Off)")
+                success, error_code = self._camera.set_white_balance(WhiteBalanceMode.OFF)
 
             if success:
-                logger.info(f"白平衡设置成功: 模式={'自动' if mode == 0 else '手动'}")
+                mode_str = ["连续", "一次", "关闭"][mode] if mode < 3 else "未知"
+                logger.info(f"白平衡设置成功: 模式={mode_str}")
                 return ProtocolBuilder.build_success_response(frame.command)
             else:
                 logger.warning("白平衡设置失败: 参数超出范围或相机不支持")
