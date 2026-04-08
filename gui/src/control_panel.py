@@ -843,7 +843,9 @@ class ControlPanel(ttk.Frame):
         if not self._widget_has_focus(self.exposure_mode_combo):
             self.exposure_mode_var.set("自动" if exposure_mode == 0 else "手动")
         if not self._widget_has_focus(self.wb_mode_combo):
-            self.wb_mode_var.set("自动" if wb_mode == 0 else "手动")
+            # 0-连续, 1-一次, 2-关闭
+            wb_mode_map = {0: "连续", 1: "一次", 2: "关闭"}
+            self.wb_mode_var.set(wb_mode_map.get(wb_mode, "关闭"))
 
         #更新自动增益
         if gain_auto is not None:

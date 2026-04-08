@@ -1093,9 +1093,6 @@ class TCPServer:
         - 曝光值(4字节): 微秒，大端序
         - 增益(2字节): 大端序（乘以100后取整）
         - 白平衡模式(1字节): 0-自动, 1-手动
-        - 白平衡R(2字节): 大端序（乘以100后取整）
-        - 白平衡G(2字节): 大端序（固定100，即1.0）
-        - 白平衡B(2字节): 大端序（乘以100后取整）
         - 分辨率宽(2字节): 大端序
         - 分辨率高(2字节): 大端序
         - 相机实际帧率(4字节): fps*100，大端序
@@ -1107,10 +1104,7 @@ class TCPServer:
         exposure_mode = 1      #手动
         exposure_us = 10000    #10ms
         gain = 100             #1.0 * 100
-        wb_mode = 0            #自动
-        wb_r = 100             #1.0 * 100
-        wb_g = 100             #1.0 * 100
-        wb_b = 100             #1.0 * 100
+        wb_mode = 0            #连续
         width = 1920
         height = 1080
         cam_fps_x100 = 0
@@ -1135,8 +1129,13 @@ class TCPServer:
                     logger.debug(f"增益值映射失败: {e}, 使用默认映射")
                     gain = int(params.gain * 100)
 
-                #白平衡模式
-                wb_mode = 0 if params.white_balance_mode == "Continuous" else 1
+                #白平衡模式: 0-连续(Continuous), 1-一次(Once), 2-关闭(Off)
+                if params.white_balance_mode == "Continuous":
+                    wb_mode = 0
+                elif params.white_balance_mode == "Once":
+                    wb_mode = 1
+                else:  # Off 或其他
+                    wb_mode = 2
 
                 #分辨率
                 width = params.width
@@ -1151,35 +1150,16 @@ class TCPServer:
             except Exception as e:
                 logger.debug(f"获取相机实际帧率失败: {e}")
 
-            #尝试获取白平衡值（需要从相机直接读取）
-            try:
-                selector_node = None
-                ratio_node = None
-                if hasattr(self._camera, "_get_first_available_node"):
-                    selector_node, _ = self._camera._get_first_available_node("BalanceRatioSelector")
-                    ratio_node, _ = self._camera._get_first_available_node("BalanceRatio")
 
-                if selector_node is not None and ratio_node is not None:
-                    #读取红色通道
-                    selector_node.SetValue("Red")
-                    wb_r = int(float(ratio_node.Value) * 100)
-                    #读取蓝色通道
-                    selector_node.SetValue("Blue")
-                    wb_b = int(float(ratio_node.Value) * 100)
-            except Exception as e:
-                logger.debug(f"获取白平衡值失败: {e}")
 
         #打包数据（注意：曝光值用I是4字节无符号整数）
         try:
             data = struct.pack(
-                '>BIHBHHHHHI',
+                '>BIHBHHHI',
                 int(exposure_mode) & 0xFF,                        #曝光模式(1字节)
                 max(0, min(0xFFFFFFFF, int(exposure_us))),        #曝光值(4字节，大端序)
                 max(0, min(0xFFFF, int(gain))),                   #增益(2字节，大端序)
                 int(wb_mode) & 0xFF,                              #白平衡模式(1字节)
-                max(0, min(0xFFFF, int(wb_r))),                   #白平衡R(2字节)
-                max(0, min(0xFFFF, int(wb_g))),                   #白平衡G(2字节)
-                max(0, min(0xFFFF, int(wb_b))),                   #白平衡B(2字节)
                 max(0, min(0xFFFF, int(width))),                  #分辨率宽(2字节)
                 max(0, min(0xFFFF, int(height))),                 #分辨率高(2字节)
                 max(0, min(0xFFFFFFFF, int(cam_fps_x100)))        #相机实际帧率*100(4字节)
@@ -1187,7 +1167,7 @@ class TCPServer:
             return data
         except struct.error as e:
             logger.error(f"构建参数数据打包失败，回退默认参数: {e}")
-            return struct.pack('>BIHBHHHHHI', 1, 10000, 100, 0, 100, 100, 100, 1920, 1080, 0)
+            return struct.pack('>BIHBHHHI', 1, 10000, 100, 0, 1920, 1080, 0)
 
     def _get_supported_resolutions(self) -> list:
         """

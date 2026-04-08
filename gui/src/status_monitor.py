@@ -215,14 +215,11 @@ class StatusMonitor(ttk.Frame):
                 'exposure_mode': data[0],  #0-自动, 1-手动
                 'exposure_value': int.from_bytes(data[1:5], 'big'),  #微秒
                 'gain': int.from_bytes(data[5:7], 'big'),
-                'wb_mode': data[7],  #0-自动, 1-手动
-                'wb_r': int.from_bytes(data[8:10], 'big'),
-                'wb_g': int.from_bytes(data[10:12], 'big'),
-                'wb_b': int.from_bytes(data[12:14], 'big'),
-                'width': int.from_bytes(data[14:16], 'big'),
-                'height': int.from_bytes(data[16:18], 'big'),
+                'wb_mode': data[7],  #0-连续, 1-一次, 2-关闭
+                'width': int.from_bytes(data[8:10], 'big'),
+                'height': int.from_bytes(data[10:12], 'big'),
                 # 兼容扩展字段：相机实际帧率 * 100（4字节）
-                'cam_fps': int.from_bytes(data[18:22], 'big') / 100.0 if len(data) >= 22 else 0.0,
+                'cam_fps': int.from_bytes(data[14:18], 'big') / 100.0 if len(data) >= 18 else 0.0,
             }
         except Exception as e:
             logger.error(f"参数解析失败: {e}")
@@ -287,13 +284,10 @@ class StatusMonitor(ttk.Frame):
         self._param_labels['gain'].config(text=f"{gain}")
 
         #白平衡显示
-        wb_mode = '自动' if params_data.get('wb_mode', 0) == 0 else '手动'
-        wb_r = params_data.get('wb_r', 0)
-        wb_g = params_data.get('wb_g', 0)
-        wb_b = params_data.get('wb_b', 0)
-        self._param_labels['white_balance'].config(
-            text=f"{wb_mode} / R:{wb_r} G:{wb_g} B:{wb_b}"
-        )
+        wb_mode_val = params_data.get('wb_mode', 0)
+        wb_mode_map = {0: '连续', 1: '一次', 2: '关闭'}
+        wb_mode = wb_mode_map.get(wb_mode_val, '关闭')
+        self._param_labels['white_balance'].config(text=f"{wb_mode}")
 
         #分辨率显示
         width = params_data.get('width', 0)
