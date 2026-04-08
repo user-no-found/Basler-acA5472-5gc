@@ -141,7 +141,7 @@ class MainWindow:
         #连接设置
         conn = self._settings.get("connection", {})
         self.host_entry.delete(0, tk.END)
-        self.host_entry.insert(0, conn.get("host", "127.0.0.1"))
+        self.host_entry.insert(0, conn.get("host", "192.168.1.15"))
         self.port_entry.delete(0, tk.END)
         self.port_entry.insert(0, str(conn.get("port", 8899)))
 
@@ -203,7 +203,7 @@ class MainWindow:
         #服务器地址
         ttk.Label(conn_frame, text="服务器地址:").pack(side=tk.LEFT, padx=(0, 5))
         self.host_entry = ttk.Entry(conn_frame, width=15)
-        self.host_entry.insert(0, "127.0.0.1")
+        self.host_entry.insert(0, "192.168.1.15")
         self.host_entry.pack(side=tk.LEFT, padx=(0, 10))
 
         #端口

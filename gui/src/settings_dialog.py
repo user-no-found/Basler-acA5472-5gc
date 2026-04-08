@@ -25,7 +25,7 @@ class SettingsDialog:
     #默认配置
     DEFAULT_SETTINGS = {
         "connection": {
-            "host": "127.0.0.1",
+            "host": "192.168.1.15",
             "port": 8899,
             "timeout": 5,
             "auto_reconnect": True,

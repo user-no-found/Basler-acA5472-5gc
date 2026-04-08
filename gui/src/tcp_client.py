@@ -596,8 +596,8 @@ if __name__ == '__main__':
     client.set_on_error(on_error)
 
     #测试连接（需要服务器运行）
-    print("尝试连接到 127.0.0.1:8899...")
-    if client.connect("127.0.0.1", 8899, timeout=3.0):
+    print("尝试连接到 192.168.1.15:8899...")
+    if client.connect("192.168.1.15", 8899, timeout=3.0):
         print("连接成功，等待5秒...")
         time.sleep(5)
         client.disconnect()
