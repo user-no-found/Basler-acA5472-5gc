@@ -1162,12 +1162,13 @@ class TCPServer:
                 int(wb_mode) & 0xFF,                              #白平衡模式(1字节)
                 max(0, min(0xFFFF, int(width))),                  #分辨率宽(2字节)
                 max(0, min(0xFFFF, int(height))),                 #分辨率高(2字节)
+                0,                                                 #保留字段(2字节)
                 max(0, min(0xFFFFFFFF, int(cam_fps_x100)))        #相机实际帧率*100(4字节)
             )
             return data
         except struct.error as e:
             logger.error(f"构建参数数据打包失败，回退默认参数: {e}")
-            return struct.pack('>BIHBHHHI', 1, 10000, 100, 0, 1920, 1080, 0)
+            return struct.pack('>BIHBHHHI', 1, 10000, 100, 0, 1920, 1080, 0, 0)
 
     def _get_supported_resolutions(self) -> list:
         """
