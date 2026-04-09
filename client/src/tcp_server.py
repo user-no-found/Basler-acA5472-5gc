@@ -186,6 +186,9 @@ class TCPServer:
         self._continuous_thread: Optional[threading.Thread] = None
         self._continuous_stop_event = threading.Event()
 
+        #闪光灯测试相关
+        self._flash_test_dir: Optional[str] = None  #当前测试目录
+
         #========== 性能优化：发送队列 ==========
         #每个客户端的发送队列（用于批量发送）
         self._send_queues: Dict[str, deque] = {}
@@ -1465,18 +1468,25 @@ class TCPServer:
         #解析测试模式参数
         test_mode = False
         test_delay_ms = 0
-        test_dir = ""
         custom_filename = None
 
         if len(frame.data) >= 3:
-            #测试模式：1字节标志 + 2字节延时 + 目录字符串
+            #测试模式：1字节标志 + 2字节延时
             test_mode = frame.data[0] == 1
             if test_mode:
                 test_delay_ms = struct.unpack('>H', frame.data[1:3])[0]
-                test_dir = frame.data[3:].decode('utf-8') if len(frame.data) > 3 else ""
                 #生成自定义文件名：flash_delay_XXXms.jpg
                 custom_filename = f"flash_delay_{test_delay_ms}ms.jpg"
-                logger.info(f"测试模式拍照: 延时{test_delay_ms}ms, 目录{test_dir}")
+                #首次测试时创建测试目录
+                if self._flash_test_dir is None:
+                    from datetime import datetime
+                    self._flash_test_dir = os.path.join(
+                        self._image_processor._save_path,
+                        f"flash_test_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
+                    )
+                    os.makedirs(self._flash_test_dir, exist_ok=True)
+                    logger.info(f"创建闪光灯测试目录: {self._flash_test_dir}")
+                logger.info(f"测试模式拍照: 延时{test_delay_ms}ms")
 
         try:
             self._is_capturing = True
@@ -1497,14 +1507,13 @@ class TCPServer:
                 )
 
             #保存图像
-            if test_mode and test_dir:
-                #测试模式：保存到指定目录，使用自定义文件名
-                import os
-                os.makedirs(test_dir, exist_ok=True)
-                full_path = os.path.join(test_dir, custom_filename)
+            if test_mode and self._flash_test_dir:
+                #测试模式：保存到测试目录，使用自定义文件名
+                full_path = os.path.join(self._flash_test_dir, custom_filename)
                 success, result, save_error = self._image_processor.save_image_to_path(image_array, full_path)
             else:
-                #普通模式：使用默认保存逻辑
+                #普通模式：使用默认保存逻辑，同时清除测试目录标记
+                self._flash_test_dir = None
                 success, result, save_error = self._image_processor.save_image_from_array(image_array, custom_filename)
 
             if success:

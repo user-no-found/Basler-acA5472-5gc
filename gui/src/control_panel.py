@@ -13,7 +13,6 @@ import tkinter as tk
 from tkinter import ttk, messagebox
 from typing import Callable, Optional, Tuple
 from loguru import logger
-import os
 from datetime import datetime
 import threading
 import time
@@ -757,13 +756,6 @@ class ControlPanel(ttk.Frame):
         #计算总张数
         total_count = (end_delay - start_delay) // step + 1
 
-        #创建测试目录
-        test_dir = os.path.join(
-            "Record",
-            f"flash_test_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
-        )
-        os.makedirs(test_dir, exist_ok=True)
-
         #更新UI状态
         self._is_flash_testing = True
         self._flash_test_stop_event.clear()
@@ -774,7 +766,7 @@ class ControlPanel(ttk.Frame):
         #启动测试线程
         self._flash_test_thread = threading.Thread(
             target=self._flash_test_worker,
-            args=(start_delay, end_delay, step, total_count, test_dir),
+            args=(start_delay, end_delay, step, total_count),
             daemon=True
         )
         self._flash_test_thread.start()
@@ -790,7 +782,7 @@ class ControlPanel(ttk.Frame):
         self.flash_test_status_label.config(text="停止中", foreground="red")
         logger.info("停止闪光灯延时测试")
 
-    def _flash_test_worker(self, start_delay: int, end_delay: int, step: int, total_count: int, test_dir: str):
+    def _flash_test_worker(self, start_delay: int, end_delay: int, step: int, total_count: int):
         """
         闪光灯测试工作线程
 
@@ -799,7 +791,6 @@ class ControlPanel(ttk.Frame):
             end_delay: 结束延时(ms)
             step: 间隔步长(ms)
             total_count: 总张数
-            test_dir: 测试照片保存目录
         """
         current_delay = start_delay
         current_count = 0
@@ -818,8 +809,8 @@ class ControlPanel(ttk.Frame):
                 #等待一小段时间确保设置生效
                 time.sleep(0.1)
 
-                #发送拍照命令（测试模式，带延时参数和目录）
-                self._send(build_capture(test_mode=True, test_delay_ms=current_delay, test_dir=test_dir))
+                #发送拍照命令（测试模式，带延时参数）
+                self._send(build_capture(test_mode=True, test_delay_ms=current_delay))
 
                 #等待1秒（或停止信号）
                 self._flash_test_stop_event.wait(1.0)
@@ -833,7 +824,7 @@ class ControlPanel(ttk.Frame):
             #恢复UI状态
             self._is_flash_testing = False
             self.after(0, self._reset_flash_test_ui)
-            logger.info(f"闪光灯测试结束, 共拍摄{current_count}张, 保存至: {test_dir}")
+            logger.info(f"闪光灯测试结束, 共拍摄{current_count}张")
 
     def _update_flash_test_ui(self, current_delay: int, current_count: int, total_count: int):
         """更新闪光灯测试UI"""
