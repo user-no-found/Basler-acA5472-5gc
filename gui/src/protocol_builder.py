@@ -167,9 +167,25 @@ def build_heartbeat() -> bytes:
     return build_frame(Command.HEARTBEAT)
 
 
-def build_capture() -> bytes:
-    """构建单次拍照命令帧"""
-    return build_frame(Command.CAPTURE)
+def build_capture(test_mode: bool = False, test_delay_ms: int = 0, test_dir: str = "") -> bytes:
+    """
+    构建单次拍照命令帧
+
+    Args:
+        test_mode: 是否为测试模式
+        test_delay_ms: 测试延时(ms)，测试模式下用于文件名
+        test_dir: 测试目录，测试模式下用于指定保存路径
+
+    Returns:
+        命令帧
+    """
+    if test_mode:
+        #测试模式：1字节标志 + 2字节延时 + 目录字符串
+        data = bytes([1]) + struct.pack('>H', test_delay_ms) + test_dir.encode('utf-8')
+        return build_frame(Command.CAPTURE, data)
+    else:
+        #普通模式：无数据
+        return build_frame(Command.CAPTURE)
 
 
 def build_continuous_start() -> bytes:

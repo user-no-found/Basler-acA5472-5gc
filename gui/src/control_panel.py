@@ -13,6 +13,10 @@ import tkinter as tk
 from tkinter import ttk, messagebox
 from typing import Callable, Optional, Tuple
 from loguru import logger
+import os
+from datetime import datetime
+import threading
+import time
 
 from protocol_builder import (
     build_capture, build_record_start, build_record_stop,
@@ -74,6 +78,11 @@ class ControlPanel(ttk.Frame):
         self._fps_min = FPS_MIN
         self._fps_max = FPS_MAX
 
+        #闪光灯测试状态
+        self._is_flash_testing = False
+        self._flash_test_thread = None
+        self._flash_test_stop_event = threading.Event()
+
         #创建界面
         self._create_ui()
 
@@ -93,6 +102,9 @@ class ControlPanel(ttk.Frame):
 
         #闪光灯控制
         self._create_flash_section()
+
+        #闪光灯延时测试
+        self._create_flash_test_section()
 
     def _create_capture_section(self):
         """创建拍照控制区域"""
@@ -416,6 +428,67 @@ class ControlPanel(ttk.Frame):
         self.apply_flash_btn = ttk.Button(frame, text="应用闪光灯设置", command=self._on_apply_flash)
         self.apply_flash_btn.pack(fill=tk.X, pady=(5, 2))
 
+    def _create_flash_test_section(self):
+        """创建闪光灯延时测试区域"""
+        frame = ttk.LabelFrame(self, text="闪光灯延时测试", padding="5")
+        frame.pack(fill=tk.X, pady=(0, 5))
+
+        #延时范围输入
+        range_frame = ttk.Frame(frame)
+        range_frame.pack(fill=tk.X, pady=2)
+
+        ttk.Label(range_frame, text="起始延时:").pack(side=tk.LEFT)
+        self.flash_test_start_var = tk.StringVar(value="100")
+        self.flash_test_start_entry = ttk.Entry(range_frame, textvariable=self.flash_test_start_var, width=8)
+        self.flash_test_start_entry.pack(side=tk.LEFT, padx=(5, 0))
+        ttk.Label(range_frame, text="ms").pack(side=tk.LEFT, padx=(2, 10))
+
+        ttk.Label(range_frame, text="结束延时:").pack(side=tk.LEFT)
+        self.flash_test_end_var = tk.StringVar(value="200")
+        self.flash_test_end_entry = ttk.Entry(range_frame, textvariable=self.flash_test_end_var, width=8)
+        self.flash_test_end_entry.pack(side=tk.LEFT, padx=(5, 0))
+        ttk.Label(range_frame, text="ms").pack(side=tk.LEFT, padx=(2, 0))
+
+        #间隔步长输入
+        step_frame = ttk.Frame(frame)
+        step_frame.pack(fill=tk.X, pady=2)
+
+        ttk.Label(step_frame, text="间隔步长:").pack(side=tk.LEFT)
+        self.flash_test_step_var = tk.StringVar(value="10")
+        self.flash_test_step_entry = ttk.Entry(step_frame, textvariable=self.flash_test_step_var, width=8)
+        self.flash_test_step_entry.pack(side=tk.LEFT, padx=(5, 0))
+        ttk.Label(step_frame, text="ms").pack(side=tk.LEFT, padx=(2, 0))
+
+        #按钮区域
+        btn_frame = ttk.Frame(frame)
+        btn_frame.pack(fill=tk.X, pady=2)
+
+        self.flash_test_start_btn = ttk.Button(btn_frame, text="开始测试", command=self._on_flash_test_start)
+        self.flash_test_start_btn.pack(side=tk.LEFT, expand=True, fill=tk.X, padx=(0, 2))
+
+        self.flash_test_stop_btn = ttk.Button(btn_frame, text="停止测试", command=self._on_flash_test_stop, state=tk.DISABLED)
+        self.flash_test_stop_btn.pack(side=tk.LEFT, expand=True, fill=tk.X, padx=(2, 0))
+
+        #状态显示
+        status_frame = ttk.Frame(frame)
+        status_frame.pack(fill=tk.X, pady=2)
+
+        ttk.Label(status_frame, text="状态:").pack(side=tk.LEFT)
+        self.flash_test_status_label = ttk.Label(status_frame, text="等待开始", foreground="gray")
+        self.flash_test_status_label.pack(side=tk.LEFT, padx=(5, 0))
+
+        #进度显示
+        progress_frame = ttk.Frame(frame)
+        progress_frame.pack(fill=tk.X, pady=2)
+
+        ttk.Label(progress_frame, text="当前:").pack(side=tk.LEFT)
+        self.flash_test_current_label = ttk.Label(progress_frame, text="--", foreground="blue")
+        self.flash_test_current_label.pack(side=tk.LEFT, padx=(5, 0))
+
+        ttk.Label(progress_frame, text="进度:").pack(side=tk.LEFT, padx=(10, 0))
+        self.flash_test_progress_label = ttk.Label(progress_frame, text="--", foreground="green")
+        self.flash_test_progress_label.pack(side=tk.LEFT, padx=(5, 0))
+
     def _get_resolution_index(self, res_str: str) -> int:
         """获取分辨率索引"""
         for name, index, w, h in RESOLUTION_OPTIONS:
@@ -657,6 +730,123 @@ class ControlPanel(ttk.Frame):
                 delay_ms=delay_ms
             )
         )
+
+    def _on_flash_test_start(self):
+        """开始闪光灯延时测试"""
+        if self._is_flash_testing:
+            return
+
+        #获取测试参数
+        try:
+            start_delay = int(self.flash_test_start_var.get().strip())
+            end_delay = int(self.flash_test_end_var.get().strip())
+            step = int(self.flash_test_step_var.get().strip())
+
+            if start_delay < 0 or end_delay < 0 or step <= 0:
+                messagebox.showerror("参数错误", "延时值必须≥0，间隔必须>0")
+                return
+
+            if start_delay > end_delay:
+                messagebox.showerror("参数错误", "起始延时不能大于结束延时")
+                return
+
+        except ValueError:
+            messagebox.showerror("参数错误", "请输入有效的数字")
+            return
+
+        #计算总张数
+        total_count = (end_delay - start_delay) // step + 1
+
+        #创建测试目录
+        test_dir = os.path.join(
+            "Record",
+            f"flash_test_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
+        )
+        os.makedirs(test_dir, exist_ok=True)
+
+        #更新UI状态
+        self._is_flash_testing = True
+        self._flash_test_stop_event.clear()
+        self.flash_test_start_btn.config(state=tk.DISABLED)
+        self.flash_test_stop_btn.config(state=tk.NORMAL)
+        self.flash_test_status_label.config(text="测试中", foreground="orange")
+
+        #启动测试线程
+        self._flash_test_thread = threading.Thread(
+            target=self._flash_test_worker,
+            args=(start_delay, end_delay, step, total_count, test_dir),
+            daemon=True
+        )
+        self._flash_test_thread.start()
+
+        logger.info(f"开始闪光灯延时测试: {start_delay}ms -> {end_delay}ms, 步长{step}ms, 共{total_count}张")
+
+    def _on_flash_test_stop(self):
+        """停止闪光灯延时测试"""
+        if not self._is_flash_testing:
+            return
+
+        self._flash_test_stop_event.set()
+        self.flash_test_status_label.config(text="停止中", foreground="red")
+        logger.info("停止闪光灯延时测试")
+
+    def _flash_test_worker(self, start_delay: int, end_delay: int, step: int, total_count: int, test_dir: str):
+        """
+        闪光灯测试工作线程
+
+        Args:
+            start_delay: 起始延时(ms)
+            end_delay: 结束延时(ms)
+            step: 间隔步长(ms)
+            total_count: 总张数
+            test_dir: 测试照片保存目录
+        """
+        current_delay = start_delay
+        current_count = 0
+
+        try:
+            while current_delay <= end_delay and not self._flash_test_stop_event.is_set():
+                current_count += 1
+
+                #更新UI显示
+                self.after(0, lambda d=current_delay, c=current_count, t=total_count: self._update_flash_test_ui(d, c, t))
+
+                #设置闪光灯延时
+                logger.info(f"闪光灯测试: 第{current_count}/{total_count}张, 延时{current_delay}ms")
+                self._send(build_set_flash(enable=True, delay_ms=current_delay))
+
+                #等待一小段时间确保设置生效
+                time.sleep(0.1)
+
+                #发送拍照命令（测试模式，带延时参数和目录）
+                self._send(build_capture(test_mode=True, test_delay_ms=current_delay, test_dir=test_dir))
+
+                #等待1秒（或停止信号）
+                self._flash_test_stop_event.wait(1.0)
+
+                #增加延时
+                current_delay += step
+
+        except Exception as e:
+            logger.error(f"闪光灯测试异常: {e}")
+        finally:
+            #恢复UI状态
+            self._is_flash_testing = False
+            self.after(0, self._reset_flash_test_ui)
+            logger.info(f"闪光灯测试结束, 共拍摄{current_count}张, 保存至: {test_dir}")
+
+    def _update_flash_test_ui(self, current_delay: int, current_count: int, total_count: int):
+        """更新闪光灯测试UI"""
+        self.flash_test_current_label.config(text=f"{current_delay}ms")
+        self.flash_test_progress_label.config(text=f"第{current_count}张/共{total_count}张")
+
+    def _reset_flash_test_ui(self):
+        """重置闪光灯测试UI"""
+        self.flash_test_start_btn.config(state=tk.NORMAL)
+        self.flash_test_stop_btn.config(state=tk.DISABLED)
+        self.flash_test_status_label.config(text="等待开始", foreground="gray")
+        self.flash_test_current_label.config(text="--")
+        self.flash_test_progress_label.config(text="--")
 
     def set_enabled(self, enabled: bool):
         """

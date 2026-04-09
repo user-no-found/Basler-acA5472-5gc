@@ -1462,6 +1462,22 @@ class TCPServer:
                 frame.command, ErrorCode.STATE_CAPTURING
             )
 
+        #解析测试模式参数
+        test_mode = False
+        test_delay_ms = 0
+        test_dir = ""
+        custom_filename = None
+
+        if len(frame.data) >= 3:
+            #测试模式：1字节标志 + 2字节延时 + 目录字符串
+            test_mode = frame.data[0] == 1
+            if test_mode:
+                test_delay_ms = struct.unpack('>H', frame.data[1:3])[0]
+                test_dir = frame.data[3:].decode('utf-8') if len(frame.data) > 3 else ""
+                #生成自定义文件名：flash_delay_XXXms.jpg
+                custom_filename = f"flash_delay_{test_delay_ms}ms.jpg"
+                logger.info(f"测试模式拍照: 延时{test_delay_ms}ms, 目录{test_dir}")
+
         try:
             self._is_capturing = True
             #执行拍照
@@ -1480,8 +1496,17 @@ class TCPServer:
                     frame.command, real_error
                 )
 
-            #保存图像（使用numpy数组保存方法）
-            success, result, save_error = self._image_processor.save_image_from_array(image_array)
+            #保存图像
+            if test_mode and test_dir:
+                #测试模式：保存到指定目录，使用自定义文件名
+                import os
+                os.makedirs(test_dir, exist_ok=True)
+                full_path = os.path.join(test_dir, custom_filename)
+                success, result, save_error = self._image_processor.save_image_to_path(image_array, full_path)
+            else:
+                #普通模式：使用默认保存逻辑
+                success, result, save_error = self._image_processor.save_image_from_array(image_array, custom_filename)
+
             if success:
                 logger.info(f"拍照成功: {result}")
                 #发送拍照完成通知，result是文件路径

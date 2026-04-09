@@ -319,6 +319,48 @@ class ImageProcessor:
             logger.error(f"图像保存失败: {e}")
             return False, str(e), 0x0203
 
+    def save_image_to_path(self, image_array, full_path: str) -> Tuple[bool, str, Optional[int]]:
+        """
+        保存图像到指定完整路径
+
+        Args:
+            image_array: numpy图像数组
+            full_path: 完整的保存路径（包含文件名）
+
+        Returns:
+            Tuple[bool, str, Optional[int]]: (是否成功, 文件路径或错误信息, 错误码或None)
+        """
+        if not PIL_AVAILABLE:
+            return False, "Pillow未安装", 0x0102
+
+        try:
+            #确保目录存在
+            save_dir = os.path.dirname(full_path)
+            if save_dir and not os.path.exists(save_dir):
+                os.makedirs(save_dir, exist_ok=True)
+
+            #根据数组维度判断图像类型
+            if len(image_array.shape) == 2:
+                #灰度图
+                pil_image = Image.fromarray(image_array, mode='L')
+            elif len(image_array.shape) == 3 and image_array.shape[2] == 3:
+                #BGR图像，转换为RGB
+                rgb_array = image_array[:, :, ::-1]
+                pil_image = Image.fromarray(rgb_array, mode='RGB')
+            else:
+                logger.error(f"不支持的图像格式: {image_array.shape}")
+                return False, "不支持的图像格式", 0x0501
+
+            #保存为JPEG
+            pil_image.save(full_path, 'JPEG', quality=self._jpeg_quality)
+
+            logger.info(f"图像保存成功: {full_path}")
+            return True, full_path, None
+
+        except Exception as e:
+            logger.error(f"图像保存失败: {e}")
+            return False, str(e), 0x0203
+
     def set_save_path(self, path: str) -> bool:
         """
         设置保存路径
