@@ -928,7 +928,7 @@ class TCPServer:
 
         新格式: [启用1字节][延时4字节(ms, 大端)]
         - 启用: 0-关闭, 1-开启
-        - 延时: 先发送闪光TCP触发，再等待该时长后触发相机拍照
+        - 延时: 曝光开始后多久触发闪光(ms)
 
         兼容旧格式(13字节): [启用1字节][延时4字节us][脉宽4字节][间隔4字节]
         - 旧格式的脉宽/间隔字段会被忽略，仅将delay_us转换为delay_ms。
@@ -939,6 +939,13 @@ class TCPServer:
             )
             return ProtocolBuilder.build_error_response(
                 frame.command, ErrorCode.DATA_LENGTH_ERROR
+            )
+
+        #检查相机是否连接
+        if self._camera is None or not self._camera.is_connected:
+            logger.warning("设置闪光灯失败: 相机未连接")
+            return ProtocolBuilder.build_error_response(
+                frame.command, ErrorCode.CAMERA_NOT_CONNECTED
             )
 
         try:
@@ -956,24 +963,34 @@ class TCPServer:
                 logger.warning(f"闪光延时不支持负值，已按0处理: {delay_ms}ms")
                 delay_ms = 0
 
-            # 先缓存用户配置。录像/预览期间只缓存，退出后恢复。
+            #缓存用户配置。录像/预览期间只缓存，退出后恢复。
             self._flash_user_config = {
                 "enable": bool(enable),
                 "delay_ms": int(delay_ms),
             }
 
             logger.info(
-                f"设置闪光灯(TCP触发): enable={enable}, delay={delay_ms}ms, "
-                f"target={self.FLASH_TRIGGER_HOST}:{self.FLASH_TRIGGER_PORT}, payload=AA AA"
+                f"设置闪光灯(Line2+Timer): enable={enable}, delay={delay_ms}ms"
             )
             if enable and delay_ms >= int(self.CONTINUOUS_INTERVAL_SEC * 1000):
                 logger.warning(
                     "闪光延时大于等于连拍周期，连拍时可能出现跨周期交错触发"
                 )
 
+            #录像/预览期间只缓存，不操作相机硬件
             if self._is_streaming_active():
                 logger.info("当前处于录像/预览中，闪光灯配置已缓存，将在退出后恢复")
                 return ProtocolBuilder.build_success_response(frame.command)
+
+            #调用相机硬件配置Line2+Timer
+            delay_us = delay_ms * 1000
+            duration_us = 1000
+            success, error_code = self._camera.set_flash_l2_timer(enable, delay_us, duration_us)
+            if not success:
+                logger.error(f"相机闪光灯硬件配置失败: error_code=0x{error_code:04X}" if error_code else "相机闪光灯硬件配置失败")
+                return ProtocolBuilder.build_error_response(
+                    frame.command, error_code or ErrorCode.CAMERA_PARAM_FAILED
+                )
 
             self._flash_forced_disabled = False
             return ProtocolBuilder.build_success_response(frame.command)
