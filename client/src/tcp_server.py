@@ -978,7 +978,7 @@ class TCPServer:
 
             #调用相机硬件配置Line2+Timer
             delay_us = delay_ms * 1000
-            duration_us = 1000
+            duration_us = 20000
             success, error_code = self._camera.set_flash_l2_timer(enable, delay_us, duration_us)
             if not success:
                 logger.error(f"相机闪光灯硬件配置失败: error_code=0x{error_code:04X}" if error_code else "相机闪光灯硬件配置失败")
@@ -1251,7 +1251,7 @@ class TCPServer:
 
         self._flash_forced_disabled = True
         if self._camera and self._camera.is_connected:
-            success, error_code = self._camera.set_flash_l2_timer(False, 0, 1000)
+            success, error_code = self._camera.set_flash_l2_timer(False, 0, 20000)
             if not success:
                 logger.warning(f"{scene}开始前禁用闪光灯硬件失败: 0x{(error_code or ErrorCode.UNKNOWN_ERROR):04X}")
                 return False, error_code or ErrorCode.CAMERA_PARAM_FAILED
@@ -1272,7 +1272,7 @@ class TCPServer:
         enable = bool(self._flash_user_config.get("enable", False))
         delay_ms = int(self._flash_user_config.get("delay_ms", 0))
         if self._camera and self._camera.is_connected:
-            success, error_code = self._camera.set_flash_l2_timer(enable, delay_ms * 1000, 1000)
+            success, error_code = self._camera.set_flash_l2_timer(enable, delay_ms * 1000, 20000)
             if not success:
                 logger.warning(
                     f"{scene}结束后恢复闪光灯硬件失败: 0x{(error_code or ErrorCode.UNKNOWN_ERROR):04X}"
