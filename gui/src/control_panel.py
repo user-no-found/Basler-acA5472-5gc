@@ -399,7 +399,7 @@ class ControlPanel(ttk.Frame):
 
     def _create_flash_section(self):
         """创建闪光灯控制区域"""
-        frame = ttk.LabelFrame(self, text="闪光灯控制（TCP触发）", padding="5")
+        frame = ttk.LabelFrame(self, text="闪光灯控制（Line2+Timer）", padding="5")
         frame.pack(fill=tk.X, pady=(0, 5))
 
         enable_frame = ttk.Frame(frame)
@@ -420,7 +420,7 @@ class ControlPanel(ttk.Frame):
         self.flash_delay_entry.pack(side=tk.LEFT, padx=(5, 0))
         ttk.Label(
             delay_frame,
-            text="(先发AA AA，再等待该时长后拍照)",
+            text="(曝光开始后，经该延时由Line2输出闪光)",
             foreground="gray"
         ).pack(side=tk.LEFT, padx=(5, 0))
 
