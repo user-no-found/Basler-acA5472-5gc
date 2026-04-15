@@ -10,5 +10,8 @@ opencv-python>=4.8.0
 # 图像缩放和JPEG编码（预览功能）
 Pillow>=10.0.0
 
+# 照片目录监控（EXIF自动写入）
+watchdog>=3.0.0
+
 # Basler相机SDK（需要单独安装pylon SDK后安装）
 # pypylon>=2.0.0

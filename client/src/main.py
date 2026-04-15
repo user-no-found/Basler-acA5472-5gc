@@ -60,6 +60,7 @@ async def main():
     logger.info("Basler 相机控制系统 - 客户端")
     logger.info("=" * 50)
 
+    server = None
     try:
         # 导入模块
         from tcp_server import TCPServer
@@ -67,6 +68,8 @@ async def main():
         from image_processor import ImageProcessor
         from image_acquisition import ImageAcquisition, PreviewAcquisition
         from config_manager import ConfigManager
+        import sensor_data
+        import photo_monitor
 
         # 加载配置
         config_path = src_dir.parent / "config" / "config.json"
@@ -110,6 +113,18 @@ async def main():
         server.set_image_acquisition(acquisition)
         server.set_preview_acquisition(preview)
 
+        # 启动传感器数据接收线程
+        sensor_data_mode = config.get("sensor_data", {}).get("mode", "110")
+        sensor_data_address = config.get("sensor_data", {}).get("address", "192.168.1.201")
+        sensor_data_port = config.get("sensor_data", {}).get("port", 2000)
+        sensor_data.start_sensor_data_receiver(
+            address=(sensor_data_address, sensor_data_port),
+            mode=sensor_data_mode
+        )
+
+        # 启动照片目录监控
+        photo_monitor.start_photo_monitor(processor._save_path)
+
         # 启动服务器
         logger.info("启动TCP服务器...")
         await server.start()
@@ -125,6 +140,18 @@ async def main():
     except Exception as e:
         logger.exception(f"程序异常退出: {e}")
         sys.exit(1)
+
+    finally:
+        # 清理资源
+        import sensor_data
+        import photo_monitor
+        sensor_data.stop_sensor_data_receiver()
+        photo_monitor.stop_photo_monitor()
+        if server is not None:
+            try:
+                await server.stop()
+            except Exception as e:
+                logger.warning(f"停止TCP服务器时发生异常: {e}")
 
     logger.info("程序正常退出")
 
