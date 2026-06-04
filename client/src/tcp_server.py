@@ -27,6 +27,7 @@ from dataclasses import dataclass, field
 from enum import IntEnum
 from datetime import datetime
 from collections import deque
+from pathlib import Path
 
 from loguru import logger
 
@@ -47,6 +48,9 @@ from protocol_parser import (
     PROTOCOL_VERSION,
 )
 from utils.errors import ErrorCode, get_error_description
+import exif_writer
+import photo_monitor
+import sensor_data
 
 if TYPE_CHECKING:
     from camera_controller import CameraController
@@ -105,6 +109,9 @@ class TCPServer:
     RECORD_PREVIEW_MAX_EDGE = 960
     # 连拍周期（秒）
     CONTINUOUS_INTERVAL_SEC = 1.0
+    # 拍照 EXIF 匹配：只使用拍照触发时刻附近的惯导帧，避免写入几秒后的最新位置
+    EXIF_GPS_MAX_DELTA_SEC = 2.0
+    EXIF_GPS_MATCH_SETTLE_SEC = 0.5
 
     #========== 性能优化常量 ==========
     #发送缓冲区大小（64KB）
@@ -1242,6 +1249,45 @@ class TCPServer:
         image_array, error_code = self._camera.grab_single()
         return image_array, error_code, lead_ts, "camera", False
 
+    def _write_capture_exif_async(self, photo_path: str, capture_ts: float, scene: str) -> None:
+        """
+        使用拍照触发时刻附近的惯导快照写入 EXIF。
+
+        注意这里不读取“写入时最新 GPS”，因为照片需要匹配拍照瞬间的位置。
+        """
+        def worker() -> None:
+            try:
+                time.sleep(self.EXIF_GPS_MATCH_SETTLE_SEC)
+                gps_data = sensor_data.get_gps_height_utc_nearest(
+                    capture_ts,
+                    max_delta_s=self.EXIF_GPS_MAX_DELTA_SEC
+                )
+                if gps_data is None:
+                    history_status = sensor_data.describe_gps_history(capture_ts)
+                    logger.error(
+                        f"{scene} GPS EXIF 未写入: 拍照时刻附近没有有效惯导数据 "
+                        f"(max_delta={self.EXIF_GPS_MAX_DELTA_SEC:.1f}s, {history_status}), "
+                        f"photo={photo_path}"
+                    )
+                    if exif_writer.modify_photo_equipment_exif(Path(photo_path)):
+                        logger.info(f"{scene} 已写入相机/镜头 EXIF，GPS 缺失: {photo_path}")
+                    else:
+                        logger.error(f"{scene} 相机/镜头 EXIF 写入失败，GPS 缺失: {photo_path}")
+                    return
+
+                if exif_writer.modify_photo_exif(Path(photo_path), gps_data=gps_data):
+                    logger.info(f"{scene} EXIF 写入成功: {photo_path}")
+                else:
+                    logger.error(f"{scene} EXIF 写入失败: {photo_path}")
+            except Exception as e:
+                logger.error(f"{scene} EXIF 写入异常: {photo_path}, {e}")
+
+        threading.Thread(
+            target=worker,
+            daemon=True,
+            name=f"CaptureExifWriter-{Path(photo_path).name}"
+        ).start()
+
     def _suspend_flash_for_streaming(self, scene: str) -> tuple[bool, Optional[int]]:
         """
         在录像/预览开始前强制关闭闪光灯（操作相机硬件）。
@@ -1469,7 +1515,7 @@ class TCPServer:
             self._is_capturing = True
             #执行拍照
             logger.info("开始拍照...")
-            image_array, error_code, _, _, cancelled = self._capture_single_with_flash_timing("单拍")
+            image_array, error_code, capture_ts, _, cancelled = self._capture_single_with_flash_timing("单拍")
             if cancelled:
                 logger.warning("拍照已取消")
                 return ProtocolBuilder.build_error_response(
@@ -1487,14 +1533,19 @@ class TCPServer:
             if test_mode and self._flash_test_dir:
                 #测试模式：保存到测试目录，使用自定义文件名
                 full_path = os.path.join(self._flash_test_dir, custom_filename)
+                photo_monitor.register_internal_photo(full_path)
                 success, result, save_error = self._image_processor.save_image_to_path(image_array, full_path)
             else:
                 #普通模式：使用默认保存逻辑，同时清除测试目录标记
                 self._flash_test_dir = None
-                success, result, save_error = self._image_processor.save_image_from_array(image_array, custom_filename)
+                filename_to_save = custom_filename or self._image_processor.generate_filename()
+                full_path = self._image_processor.get_full_path(filename_to_save)
+                photo_monitor.register_internal_photo(full_path)
+                success, result, save_error = self._image_processor.save_image_from_array(image_array, filename_to_save)
 
             if success:
                 logger.info(f"拍照成功: {result}")
+                self._write_capture_exif_async(result, capture_ts, "单拍")
                 #发送拍照完成通知，result是文件路径
                 filename = os.path.basename(result)
                 return ProtocolBuilder.build_capture_complete(filename)
@@ -2117,10 +2168,17 @@ class TCPServer:
                     logger.error(f"连续拍照失败: 错误码 0x{real_error:04X}")
                 else:
                     #保存图像
-                    success, result, save_error = self._image_processor.save_image_from_array(image_array)
+                    filename_to_save = self._image_processor.generate_filename()
+                    full_path = self._image_processor.get_full_path(filename_to_save)
+                    photo_monitor.register_internal_photo(full_path)
+                    success, result, save_error = self._image_processor.save_image_from_array(
+                        image_array,
+                        filename_to_save
+                    )
                     if success:
                         capture_count += 1
                         logger.info(f"连续拍照成功 [{capture_count}]: {result}")
+                        self._write_capture_exif_async(result, lead_ts, f"连拍#{capture_count}")
 
                         #发送拍照完成通知
                         if self._event_loop:

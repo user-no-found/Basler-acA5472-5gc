@@ -18,15 +18,20 @@ import socket
 import struct
 import threading
 import time
+from collections import deque
 from typing import Optional, Dict, Tuple
 
 from loguru import logger
 
 # 默认数据源地址和端口
-DEFAULT_RELAY_ADDRESS = ("192.168.1.201", 2000)
+DEFAULT_RELAY_ADDRESS = ("192.168.1.119", 8081)
+DATA_IDLE_RECONNECT_SEC = 2.0
+RECONNECT_DELAY_SEC = 1.0
 
 # 全局解析结果缓存
 _result: Dict[str, str] = {}
+_result_updated_at = 0.0
+_result_history = deque(maxlen=300)
 _result_lock = threading.Lock()
 
 # 线程控制标志
@@ -42,6 +47,47 @@ class NavDataBuffer:
         self.end = bytes([0xFB, 0xBF])
         self.location = 0
         self.data = bytearray(133)
+
+
+NAV_134_HEADER = b"\xFA\xAF"
+NAV_134_FOOTER = b"\xFB\xBF"
+NAV_134_FRAME_LEN = 133
+
+
+def _extract_gps_height_utc(result: Dict[str, str]) -> Optional[Tuple[str, str, str, str, str, str, str, str, str]]:
+    try:
+        latitude = result["latitude"]
+        longitude = result["longitude"]
+        height = result["height"]
+        utc_year = result["utc_year"]
+        utc_month = result["utc_month"]
+        utc_day = result["utc_day"]
+        utc_hour = result["utc_hour"]
+        utc_minute = result["utc_minute"]
+        utc_second = result["utc_second"]
+        return (
+            latitude, longitude, height,
+            utc_year, utc_month, utc_day,
+            utc_hour, utc_minute, utc_second
+        )
+    except KeyError:
+        return None
+
+
+def _cache_result(parsed: Dict[str, str], received_timestamp: Optional[float] = None) -> None:
+    """缓存最新惯导解析结果，并保留本机接收时间用于按拍照时刻匹配。"""
+    global _result_updated_at
+    if not parsed:
+        return
+
+    timestamp = received_timestamp if received_timestamp is not None else time.monotonic()
+    snapshot = parsed.copy()
+    with _result_lock:
+        _result.clear()
+        _result.update(snapshot)
+        _result_updated_at = timestamp
+        if _extract_gps_height_utc(snapshot) is not None:
+            _result_history.append((timestamp, snapshot))
 
 
 def _parse_110_bytes(data: bytes) -> Dict[str, str]:
@@ -207,6 +253,7 @@ def _parse_134_bytes(data: bytes) -> Dict[str, str]:
 
 def _read_110_data(sock: socket.socket) -> None:
     """读取并解析 110 字节定长数据"""
+    last_data_at = time.monotonic()
     while not _should_exit.is_set():
         try:
             sock.settimeout(1.0)
@@ -216,13 +263,17 @@ def _read_110_data(sock: socket.socket) -> None:
                 if not chunk:
                     raise ConnectionError("连接已关闭")
                 data += chunk
+                last_data_at = time.monotonic()
             if len(data) == 110:
                 parsed = _parse_110_bytes(data)
-                with _result_lock:
-                    _result.clear()
-                    _result.update(parsed)
+                _cache_result(parsed, received_timestamp=last_data_at)
                 logger.debug(f"解析结果: {_result}")
         except socket.timeout:
+            if time.monotonic() - last_data_at > DATA_IDLE_RECONNECT_SEC:
+                logger.warning(
+                    f"110 数据超过 {DATA_IDLE_RECONNECT_SEC:.1f}s 未更新，主动重连传感器数据源"
+                )
+                break
             continue
         except Exception as e:
             logger.error(f"读取 110 数据错误: {e}")
@@ -231,58 +282,56 @@ def _read_110_data(sock: socket.socket) -> None:
 
 def _read_134_data(sock: socket.socket) -> None:
     """读取并解析 134 字节滑动窗口数据"""
-    nav = NavDataBuffer()
-    buffer = bytearray(1024)
+    stream = bytearray()
+    last_valid_frame_at = time.monotonic()
 
     while not _should_exit.is_set():
         try:
             sock.settimeout(1.0)
-            bytes_read = sock.recv_into(buffer)
-            if bytes_read == 0:
+            chunk = sock.recv(4096)
+            if not chunk:
                 raise ConnectionError("连接已关闭")
+            received_at = time.monotonic()
+            stream.extend(chunk)
 
-            bytes_to_copy = bytes_read
-            location_header = nav.location
+            while not _should_exit.is_set():
+                header_index = stream.find(NAV_134_HEADER)
+                if header_index < 0:
+                    if len(stream) > 1:
+                        # 保留最后 1 字节，避免帧头 FA/AF 被分在两次 recv 中。
+                        del stream[:-1]
+                    break
 
-            # 查找帧头
-            if nav.location == 0:
-                header_index = None
-                for i in range(bytes_read):
-                    if buffer[i] == nav.header:
-                        header_index = i
-                        break
+                if header_index > 0:
+                    del stream[:header_index]
 
-                if header_index is not None:
-                    nav.location = nav.location + (bytes_to_copy - header_index)
-                    if nav.location > nav.length:
-                        bytes_to_copy = bytes_to_copy - (nav.location - nav.length)
-                        nav.location = nav.length
-                    location_end = nav.location
-                    start = location_header
-                    end = location_end
-                    nav.data[start:end] = buffer[header_index:header_index + (end - start)]
-            else:
-                nav.location = nav.location + bytes_to_copy
-                if nav.location > nav.length:
-                    bytes_to_copy = bytes_to_copy - (nav.location - nav.length)
-                    nav.location = nav.length
-                location_end = nav.location
-                start = location_header
-                end = location_end
-                nav.data[start:end] = buffer[:bytes_to_copy]
+                if len(stream) < NAV_134_FRAME_LEN:
+                    break
 
-            # 判断数据是否有效
-            if (nav.location == nav.length and
-                    nav.data[0] == 0xFA and nav.data[1] == 0xAF and
-                    nav.data[131] == 0xFB and nav.data[132] == 0xBF):
-                logger.debug(f"解析到有效数据: {nav.data[:20].hex().upper()}...")
-                parsed = _parse_134_bytes(nav.data)
-                with _result_lock:
-                    _result.clear()
-                    _result.update(parsed)
-                nav.location = 0
+                frame = bytes(stream[:NAV_134_FRAME_LEN])
+                if frame[-2:] != NAV_134_FOOTER:
+                    logger.debug("134 数据帧尾校验失败，继续滑动查找下一帧头")
+                    del stream[0]
+                    continue
+
+                logger.debug(f"解析到有效数据: {frame[:20].hex().upper()}...")
+                parsed = _parse_134_bytes(frame)
+                _cache_result(parsed, received_timestamp=received_at)
+                last_valid_frame_at = received_at
+                del stream[:NAV_134_FRAME_LEN]
+
+            if time.monotonic() - last_valid_frame_at > DATA_IDLE_RECONNECT_SEC:
+                logger.warning(
+                    f"134 有效数据超过 {DATA_IDLE_RECONNECT_SEC:.1f}s 未更新，主动重连传感器数据源"
+                )
+                break
 
         except socket.timeout:
+            if time.monotonic() - last_valid_frame_at > DATA_IDLE_RECONNECT_SEC:
+                logger.warning(
+                    f"134 有效数据超过 {DATA_IDLE_RECONNECT_SEC:.1f}s 未更新，主动重连传感器数据源"
+                )
+                break
             continue
         except Exception as e:
             logger.error(f"读取 134 数据错误: {e}")
@@ -307,7 +356,7 @@ def _tcp_connect_loop(address: Tuple[str, int], mode: str) -> None:
                 break
 
         except Exception as e:
-            logger.error(f"连接传感器数据源失败: {e}")
+            logger.error(f"连接传感器数据源失败 {address[0]}:{address[1]}: {e}")
 
         finally:
             if sock is not None:
@@ -317,8 +366,8 @@ def _tcp_connect_loop(address: Tuple[str, int], mode: str) -> None:
                     pass
 
         if not _should_exit.is_set():
-            logger.info("5 秒后重连传感器数据源...")
-            for _ in range(50):
+            logger.info(f"{RECONNECT_DELAY_SEC:.1f} 秒后重连传感器数据源...")
+            for _ in range(max(1, int(RECONNECT_DELAY_SEC * 10))):
                 if _should_exit.is_set():
                     break
                 time.sleep(0.1)
@@ -351,7 +400,7 @@ def start_sensor_data_receiver(
         name="SensorDataReceiver"
     )
     _receiver_thread.start()
-    logger.info(f"启动传感器数据接收线程，模式={mode}")
+    logger.info(f"启动传感器数据接收线程: {address[0]}:{address[1]}, 模式={mode}")
 
 
 def stop_sensor_data_receiver() -> None:
@@ -364,9 +413,12 @@ def stop_sensor_data_receiver() -> None:
     logger.info("传感器数据接收线程已停止")
 
 
-def get_gps_height_utc() -> Optional[Tuple[str, str, str, str, str, str, str, str, str]]:
+def get_gps_height_utc(max_age_s: Optional[float] = None) -> Optional[Tuple[str, str, str, str, str, str, str, str, str]]:
     """
     获取 GPS、高度与 UTC 时间
+
+    Args:
+        max_age_s: 数据最大允许年龄（秒）。None 表示不检查新鲜度。
 
     Returns:
         Optional[Tuple]: (纬度, 经度, 高度, 年, 月, 日, 时, 分, 秒)
@@ -374,21 +426,87 @@ def get_gps_height_utc() -> Optional[Tuple[str, str, str, str, str, str, str, st
     """
     with _result_lock:
         result = _result.copy()
+        updated_at = _result_updated_at
 
-    try:
-        latitude = result["latitude"]
-        longitude = result["longitude"]
-        height = result["height"]
-        utc_year = result["utc_year"]
-        utc_month = result["utc_month"]
-        utc_day = result["utc_day"]
-        utc_hour = result["utc_hour"]
-        utc_minute = result["utc_minute"]
-        utc_second = result["utc_second"]
-        return (
-            latitude, longitude, height,
-            utc_year, utc_month, utc_day,
-            utc_hour, utc_minute, utc_second
-        )
-    except KeyError:
+    if max_age_s is not None:
+        if updated_at <= 0:
+            return None
+        age_s = time.monotonic() - updated_at
+        if age_s > max_age_s:
+            logger.warning(f"惯导数据已过期: {age_s:.2f}s > {max_age_s:.2f}s")
+            return None
+
+    return _extract_gps_height_utc(result)
+
+
+def get_gps_height_utc_nearest(
+    target_timestamp: float,
+    max_delta_s: Optional[float] = None
+) -> Optional[Tuple[str, str, str, str, str, str, str, str, str]]:
+    """
+    获取最接近指定本机单调时钟时刻的 GPS、高度与 UTC 时间。
+
+    Args:
+        target_timestamp: 使用 time.monotonic() 记录的目标时刻，通常为相机抓图触发时刻。
+        max_delta_s: 最大允许时间差（秒）。None 表示不检查。
+
+    Returns:
+        Optional[Tuple]: (纬度, 经度, 高度, 年, 月, 日, 时, 分, 秒)
+                         如果历史为空、字段缺失或超过最大时间差，返回 None。
+    """
+    with _result_lock:
+        history = list(_result_history)
+
+    if not history:
         return None
+
+    best_timestamp, best_result = min(
+        history,
+        key=lambda item: abs(item[0] - target_timestamp)
+    )
+    delta_s = abs(best_timestamp - target_timestamp)
+
+    if max_delta_s is not None and delta_s > max_delta_s:
+        logger.warning(
+            f"未找到足够接近拍照时刻的惯导数据: "
+            f"delta={delta_s:.3f}s > {max_delta_s:.3f}s"
+        )
+        return None
+
+    gps_data = _extract_gps_height_utc(best_result)
+    if gps_data is None:
+        return None
+
+    logger.debug(f"匹配拍照时刻惯导数据: delta={delta_s:.3f}s")
+    return gps_data
+
+
+def describe_gps_history(target_timestamp: Optional[float] = None) -> str:
+    """返回当前惯导历史缓存状态，供拍照 EXIF 失败日志诊断。"""
+    now = time.monotonic()
+    with _result_lock:
+        history = list(_result_history)
+        updated_at = _result_updated_at
+
+    if not history:
+        if updated_at > 0:
+            return f"history=0, latest_result_age={now - updated_at:.3f}s, latest_result_has_no_gps"
+        return "history=0, no_parsed_result"
+
+    latest_timestamp, latest_result = history[-1]
+    latest_age_s = now - latest_timestamp
+    gps_data = _extract_gps_height_utc(latest_result)
+
+    detail = f"history={len(history)}, latest_age={latest_age_s:.3f}s"
+    if target_timestamp is not None:
+        nearest_timestamp, _ = min(history, key=lambda item: abs(item[0] - target_timestamp))
+        detail += f", nearest_delta={abs(nearest_timestamp - target_timestamp):.3f}s"
+
+    if gps_data is not None:
+        latitude, longitude, height, year, month, day, hour, minute, second = gps_data
+        detail += (
+            f", latest_gps=({latitude},{longitude}), height={height}, "
+            f"utc={year}-{month}-{day} {hour}:{minute}:{second}"
+        )
+
+    return detail

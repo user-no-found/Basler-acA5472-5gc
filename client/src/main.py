@@ -80,14 +80,24 @@ async def main():
         logger.info("初始化相机控制器...")
         camera = CameraController()
 
-        # 尝试连接相机
-        success, error_code = camera.connect()
-        if success:
-            logger.info("相机连接成功")
-        else:
-            logger.error(f"相机连接失败 (错误码: 0x{error_code:04X})")
+        # 启动时持续等待相机上线，避免开机自启动早于相机/网卡就绪而直接退出
+        reconnect_interval = config_manager.camera_reconnect_interval
+        attempt = 0
+        while True:
+            attempt += 1
+            success, error_code = camera.connect()
+            if success:
+                logger.info("相机连接成功")
+                break
+
+            err_text = f"0x{error_code:04X}" if error_code is not None else "未知"
+            logger.error(f"相机连接失败 (错误码: {err_text})")
             logger.error("请检查: 1) 相机是否已连接 2) pylon Viewer是否已关闭 3) USB/网线是否正常")
-            sys.exit(1)
+            logger.info(
+                f"{reconnect_interval} 秒后重新尝试连接相机... "
+                f"(第 {attempt} 次失败，程序保持运行)"
+            )
+            await asyncio.sleep(reconnect_interval)
 
         # 初始化图像处理器
         logger.info("初始化图像处理器...")
@@ -115,8 +125,8 @@ async def main():
 
         # 启动传感器数据接收线程
         sensor_data_mode = config.get("sensor_data", {}).get("mode", "110")
-        sensor_data_address = config.get("sensor_data", {}).get("address", "192.168.1.201")
-        sensor_data_port = config.get("sensor_data", {}).get("port", 2000)
+        sensor_data_address = config.get("sensor_data", {}).get("address", "192.168.1.119")
+        sensor_data_port = config.get("sensor_data", {}).get("port", 8081)
         sensor_data.start_sensor_data_receiver(
             address=(sensor_data_address, sensor_data_port),
             mode=sensor_data_mode
