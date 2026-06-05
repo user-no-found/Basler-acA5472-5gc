@@ -49,6 +49,7 @@ from protocol_parser import (
 )
 from utils.errors import ErrorCode, get_error_description
 import exif_writer
+import lever_arm
 import photo_monitor
 import sensor_data
 
@@ -1258,11 +1259,11 @@ class TCPServer:
         def worker() -> None:
             try:
                 time.sleep(self.EXIF_GPS_MATCH_SETTLE_SEC)
-                gps_data = sensor_data.get_gps_height_utc_nearest(
+                nav_data = sensor_data.get_nav_data_nearest(
                     capture_ts,
                     max_delta_s=self.EXIF_GPS_MAX_DELTA_SEC
                 )
-                if gps_data is None:
+                if nav_data is None:
                     history_status = sensor_data.describe_gps_history(capture_ts)
                     logger.error(
                         f"{scene} GPS EXIF 未写入: 拍照时刻附近没有有效惯导数据 "
@@ -1275,7 +1276,22 @@ class TCPServer:
                         logger.error(f"{scene} 相机/镜头 EXIF 写入失败，GPS 缺失: {photo_path}")
                     return
 
-                if exif_writer.modify_photo_exif(Path(photo_path), gps_data=gps_data):
+                camera_nav_data = lever_arm.apply_camera_lever_arm(nav_data)
+                logger.info(
+                    f"{scene} 匹配惯导数据用于 EXIF: "
+                    f"ins_gps=({nav_data.get('latitude')},{nav_data.get('longitude')}), "
+                    f"camera_gps=({camera_nav_data.get('latitude')},{camera_nav_data.get('longitude')}), "
+                    f"camera_depth={camera_nav_data.get('depth')}m, "
+                    f"camera_altitude_bottom={camera_nav_data.get('height_above_bottom')}m, "
+                    f"lever_arm_ned=({camera_nav_data.get('lever_arm_north_m')},"
+                    f"{camera_nav_data.get('lever_arm_east_m')},"
+                    f"{camera_nav_data.get('lever_arm_down_ned_m')}), "
+                    f"rpy=({nav_data.get('roll')},{nav_data.get('pitch')},{nav_data.get('yaw')}), "
+                    f"utc={nav_data.get('utc_year')}-{nav_data.get('utc_month')}-{nav_data.get('utc_day')} "
+                    f"{nav_data.get('utc_hour')}:{nav_data.get('utc_minute')}:{nav_data.get('utc_second')}"
+                )
+
+                if exif_writer.modify_photo_exif(Path(photo_path), nav_data=camera_nav_data):
                     logger.info(f"{scene} EXIF 写入成功: {photo_path}")
                 else:
                     logger.error(f"{scene} EXIF 写入失败: {photo_path}")

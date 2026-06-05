@@ -15,13 +15,14 @@ import shutil
 import subprocess
 import time
 from pathlib import Path
-from typing import Optional, Tuple
+from typing import Mapping, Optional, Tuple
 
 from loguru import logger
 
 import sensor_data
 
 GpsExifData = Tuple[str, str, str, str, str, str, str, str, str]
+NavExifData = Mapping[str, str]
 
 # Fixed optical metadata for this client:
 # Basler acA5472-5gc + Basler Lens C12-1224-25M.
@@ -34,27 +35,109 @@ SENSOR_WIDTH_MM = 13.13
 SENSOR_HEIGHT_MM = 8.76
 PIXEL_SIZE_UM = 2.40
 FOCAL_PLANE_RESOLUTION_PPI = 25400.0 / PIXEL_SIZE_UM
+FULL_FRAME_DIAGONAL_MM = (36.0 ** 2 + 24.0 ** 2) ** 0.5
+SENSOR_DIAGONAL_MM = (SENSOR_WIDTH_MM ** 2 + SENSOR_HEIGHT_MM ** 2) ** 0.5
+FOCAL_LENGTH_35MM_EQ_MM = int(round(
+    FOCAL_LENGTH_MM * FULL_FRAME_DIAGONAL_MM / SENSOR_DIAGONAL_MM
+))
 EXIF_EQUIPMENT_COMMENT = (
     f"Camera={CAMERA_MAKE} {CAMERA_MODEL}; "
     f"Lens={LENS_MODEL}; "
     f"FocalLength={FOCAL_LENGTH_MM:.1f} mm; "
+    f"FocalLength35mmEquivalent={FOCAL_LENGTH_35MM_EQ_MM} mm; "
     f"SensorSize={SENSOR_WIDTH_MM:.2f}x{SENSOR_HEIGHT_MM:.2f} mm; "
     f"PixelSize={PIXEL_SIZE_UM:.2f}x{PIXEL_SIZE_UM:.2f} um"
 )
 
 
-def _equipment_exif_args() -> list:
+def _equipment_exif_args(user_comment: Optional[str] = None) -> list:
     return [
         f"-Make={CAMERA_MAKE}",
         f"-Model={CAMERA_MODEL}",
         f"-LensMake={LENS_MAKE}",
         f"-LensModel={LENS_MODEL}",
         f"-FocalLength={FOCAL_LENGTH_MM:.1f} mm",
+        f"-EXIF:FocalLengthIn35mmFormat={FOCAL_LENGTH_35MM_EQ_MM}",
+        f"-XMP-exif:FocalLengthIn35mmFormat={FOCAL_LENGTH_35MM_EQ_MM}",
         f"-FocalPlaneXResolution={FOCAL_PLANE_RESOLUTION_PPI:.6f}",
         f"-FocalPlaneYResolution={FOCAL_PLANE_RESOLUTION_PPI:.6f}",
         "-FocalPlaneResolutionUnit=inches",
-        f"-UserComment={EXIF_EQUIPMENT_COMMENT}",
+        f"-UserComment={user_comment or EXIF_EQUIPMENT_COMMENT}",
     ]
+
+
+def _gps_data_from_nav_data(nav_data: NavExifData) -> Optional[GpsExifData]:
+    try:
+        return (
+            nav_data["latitude"],
+            nav_data["longitude"],
+            nav_data["height"],
+            nav_data["utc_year"],
+            nav_data["utc_month"],
+            nav_data["utc_day"],
+            nav_data["utc_hour"],
+            nav_data["utc_minute"],
+            nav_data["utc_second"],
+        )
+    except KeyError:
+        return None
+
+
+def _nav_comment(nav_data: Optional[NavExifData]) -> str:
+    if nav_data is None:
+        return EXIF_EQUIPMENT_COMMENT
+
+    fields = [
+        ("CameraLatitude", "latitude"),
+        ("CameraLongitude", "longitude"),
+        ("InsLatitude", "ins_latitude"),
+        ("InsLongitude", "ins_longitude"),
+        ("DepthM", "depth"),
+        ("HeightForExifM", "height"),
+        ("AltitudeAboveBottomM", "height_above_bottom"),
+        ("InsDepthM", "ins_depth"),
+        ("InsAltitudeAboveBottomM", "ins_height_above_bottom"),
+        ("RollDeg", "roll"),
+        ("PitchDeg", "pitch"),
+        ("YawDeg", "yaw"),
+        ("GyroRoll", "body_angular_velocity_roll"),
+        ("GyroPitch", "body_angular_velocity_pitch"),
+        ("GyroYaw", "body_angular_velocity_yaw"),
+        ("VelocityForward", "body_velocity_forward"),
+        ("VelocityRight", "body_velocity_right"),
+        ("VelocityDown", "body_velocity_down"),
+        ("InsState", "ins_state"),
+        ("GpsState", "gps_state"),
+        ("DvlState", "dvl_state"),
+        ("SensorValid", "sensor_valid"),
+        ("ChecksumOk", "checksum_ok"),
+        ("LeverArmApplied", "lever_arm_correction_applied"),
+        ("LeverArmForwardM", "lever_arm_forward_m"),
+        ("LeverArmRightM", "lever_arm_right_m"),
+        ("LeverArmDownM", "lever_arm_down_m"),
+        ("LeverArmNorthM", "lever_arm_north_m"),
+        ("LeverArmEastM", "lever_arm_east_m"),
+        ("LeverArmDownNedM", "lever_arm_down_ned_m"),
+    ]
+    parts = [EXIF_EQUIPMENT_COMMENT]
+    nav_parts = []
+    for label, key in fields:
+        value = nav_data.get(key)
+        if value not in (None, ""):
+            nav_parts.append(f"{label}={value}")
+
+    year = nav_data.get("utc_year")
+    month = nav_data.get("utc_month")
+    day = nav_data.get("utc_day")
+    hour = nav_data.get("utc_hour")
+    minute = nav_data.get("utc_minute")
+    second = nav_data.get("utc_second")
+    if all(value not in (None, "") for value in (year, month, day, hour, minute, second)):
+        nav_parts.append(f"NavUTC={year}-{month}-{day} {hour}:{minute}:{second}")
+
+    if nav_parts:
+        parts.append("NavData=" + "; ".join(nav_parts))
+    return "; ".join(parts)
 
 
 def _exiftool_available() -> bool:
@@ -151,6 +234,7 @@ def modify_photo_equipment_exif(photo_path: Path) -> bool:
 def modify_photo_exif(
     photo_path: Path,
     gps_data: Optional[GpsExifData] = None,
+    nav_data: Optional[NavExifData] = None,
     max_gps_age_s: Optional[float] = None
 ) -> bool:
     """
@@ -176,8 +260,12 @@ def modify_photo_exif(
 
     for attempt in range(1, max_retries + 1):
         current_gps_data = gps_data
+        current_nav_data = nav_data
+        if current_gps_data is None and current_nav_data is not None:
+            current_gps_data = _gps_data_from_nav_data(current_nav_data)
         if current_gps_data is None:
             current_gps_data = sensor_data.get_gps_height_utc(max_age_s=max_gps_age_s)
+            current_nav_data = None
 
         if current_gps_data is None:
             logger.error(f"无法获取 GPS 和 UTC 数据 (尝试 {attempt}/{max_retries})，等待 {retry_delay_ms}ms 后重试")
@@ -217,16 +305,31 @@ def modify_photo_exif(
         except (ValueError, TypeError):
             height_f = 0.0
         altitude_ref = "0" if height_f >= 0.0 else "1"
+        altitude_value = abs(height_f)
+
+        try:
+            latitude_f = float(latitude)
+        except (ValueError, TypeError):
+            latitude_f = 0.0
+        try:
+            longitude_f = float(longitude)
+        except (ValueError, TypeError):
+            longitude_f = 0.0
+        latitude_ref = "N" if latitude_f >= 0.0 else "S"
+        longitude_ref = "E" if longitude_f >= 0.0 else "W"
 
         cmd = [
             "exiftool",
             "-overwrite_original",
-            *_equipment_exif_args(),
-            f"-GPSLatitude={latitude}",
-            f"-GPSLongitude={longitude}",
-            f"-GPSAltitude={height}",
-            f"-GPSAltitudeRef={altitude_ref}",
+            *_equipment_exif_args(user_comment=_nav_comment(current_nav_data)),
+            f"-GPSLatitude={abs(latitude_f)}",
+            f"-GPSLatitudeRef={latitude_ref}",
+            f"-GPSLongitude={abs(longitude_f)}",
+            f"-GPSLongitudeRef={longitude_ref}",
+            f"-GPSAltitude={altitude_value}",
+            f"-GPSAltitudeRef#={altitude_ref}",
             f"-GPSTimeStamp={hour:02d}:{minute:02d}:{seconds:02d}",
+            f"-GPSDateStamp={year:04d}:{month:02d}:{day:02d}",
             f"-DateTime={formatted_time}",
             f"-DateTimeOriginal={formatted_time}",
             f"-CreateDate={formatted_time}",

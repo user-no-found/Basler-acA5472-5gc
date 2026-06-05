@@ -54,6 +54,16 @@ NAV_134_FOOTER = b"\xFB\xBF"
 NAV_134_FRAME_LEN = 133
 
 
+def _xor_checksum(data: bytes) -> int:
+    if not data:
+        return 0
+
+    checksum = data[0]
+    for value in data[1:]:
+        checksum ^= value
+    return checksum & 0xFF
+
+
 def _extract_gps_height_utc(result: Dict[str, str]) -> Optional[Tuple[str, str, str, str, str, str, str, str, str]]:
     try:
         latitude = result["latitude"]
@@ -219,21 +229,62 @@ def _parse_110_bytes(data: bytes) -> Dict[str, str]:
 
 
 def _parse_134_bytes(data: bytes) -> Dict[str, str]:
-    """解析 134 字节数据帧（实际数据体 133 字节）"""
+    """解析 134 字节数据帧（实际数据体 133 字节）。"""
     result = {}
     if len(data) != 133:
         return result
 
-    # GPS 坐标（83-90 字节，小端序）
-    longitude = struct.unpack("<I", data[83:87])[0] / 1e7
-    latitude = struct.unpack("<I", data[87:91])[0] / 1e7
+    # 姿态角（2-13 字节，小端 f32，单位：度）
+    roll = struct.unpack("<f", data[2:6])[0]
+    pitch = struct.unpack("<f", data[6:10])[0]
+    yaw = struct.unpack("<f", data[10:14])[0]
+    result["roll"] = str(roll)
+    result["pitch"] = str(pitch)
+    result["yaw"] = str(yaw)
+
+    # 机体角速度（14-25 字节，小端 f32）
+    result["body_angular_velocity_roll"] = str(struct.unpack("<f", data[14:18])[0])
+    result["body_angular_velocity_pitch"] = str(struct.unpack("<f", data[18:22])[0])
+    result["body_angular_velocity_yaw"] = str(struct.unpack("<f", data[22:26])[0])
+
+    # 机体速度（26-37 字节，小端 f32）：前、右、下
+    result["body_velocity_forward"] = str(struct.unpack("<f", data[26:30])[0])
+    result["body_velocity_right"] = str(struct.unpack("<f", data[30:34])[0])
+    result["body_velocity_down"] = str(struct.unpack("<f", data[34:38])[0])
+
+    # GPS 坐标（38-45 字节，小端 uint32，单位：度 * 1e7）
+    latitude = struct.unpack("<I", data[38:42])[0] / 1e7
+    longitude = struct.unpack("<I", data[42:46])[0] / 1e7
     result["longitude"] = str(longitude)
     result["latitude"] = str(latitude)
-    logger.debug(f"GPS 坐标: ({latitude}, {longitude})")
 
-    # 深度和高度（91-94 字节，小端序 f32）
-    height = struct.unpack("<f", data[91:95])[0]
-    result["height"] = str(height)
+    # 压力深度和对海底高度（107-114 字节，小端 f32）
+    # depth: 距海面深度，>=0，越深越大；height 用于 EXIF，按海平面高度约定写成负深度。
+    depth = struct.unpack("<f", data[107:111])[0]
+    altitude = struct.unpack("<f", data[111:115])[0]
+    result["depth"] = str(depth)
+    result["height"] = str(-depth)
+    result["altitude"] = str(altitude)
+    result["height_above_bottom"] = str(altitude)
+
+    # 状态字节（115、129 字节）
+    sensor_valid = data[115]
+    result["sensor_valid"] = f"{sensor_valid:08b}"
+    result["sensor_valid_raw"] = str(sensor_valid)
+    result["ins_state"] = str(data[129])
+
+    dvl_state = 0
+    gps_state = 0
+    if sensor_valid & 0x01:
+        dvl_state = 1
+    if sensor_valid & (0x01 << 1):
+        dvl_state = 2
+    if sensor_valid & (0x01 << 2):
+        gps_state = 1
+    if sensor_valid & (0x01 << 3):
+        gps_state = 2
+    result["dvl_state"] = str(dvl_state)
+    result["gps_state"] = str(gps_state)
 
     # UTC 时间（116-124 字节）
     result["utc_year"] = str(data[116])
@@ -247,6 +298,15 @@ def _parse_134_bytes(data: bytes) -> Dict[str, str]:
         f"UTC 时间: {data[116]}年{data[117]}月{data[118]}日 "
         f"{data[119]}时{data[120]}分{utc_second:.2f}秒"
     )
+    logger.debug(
+        f"惯导姿态: roll={roll:.3f}, pitch={pitch:.3f}, yaw={yaw:.3f}; "
+        f"GPS=({latitude}, {longitude}); depth={depth:.3f}m; "
+        f"altitude={altitude:.3f}m; ins={data[129]}, gps={gps_state}, dvl={dvl_state}"
+    )
+
+    result["checksum"] = str(data[130])
+    result["checksum_ok"] = "true"
+    result["footer"] = data[131:133].hex().upper()
 
     return result
 
@@ -311,6 +371,14 @@ def _read_134_data(sock: socket.socket) -> None:
                 frame = bytes(stream[:NAV_134_FRAME_LEN])
                 if frame[-2:] != NAV_134_FOOTER:
                     logger.debug("134 数据帧尾校验失败，继续滑动查找下一帧头")
+                    del stream[0]
+                    continue
+
+                checksum_calc = _xor_checksum(frame[:130])
+                if frame[130] != checksum_calc:
+                    logger.warning(
+                        f"134 数据校验失败: recv=0x{frame[130]:02X}, calc=0x{checksum_calc:02X}"
+                    )
                     del stream[0]
                     continue
 
@@ -454,6 +522,23 @@ def get_gps_height_utc_nearest(
         Optional[Tuple]: (纬度, 经度, 高度, 年, 月, 日, 时, 分, 秒)
                          如果历史为空、字段缺失或超过最大时间差，返回 None。
     """
+    nav_data = get_nav_data_nearest(target_timestamp, max_delta_s=max_delta_s)
+    if nav_data is None:
+        return None
+
+    return _extract_gps_height_utc(nav_data)
+
+
+def get_nav_data_nearest(
+    target_timestamp: float,
+    max_delta_s: Optional[float] = None
+) -> Optional[Dict[str, str]]:
+    """
+    获取最接近指定本机单调时钟时刻的完整惯导快照。
+
+    本机时间只用于选择哪一帧惯导数据；返回的快照不包含本机时间，
+    写入照片时应使用快照中的 GPS、深度、UTC、姿态等实际惯导字段。
+    """
     with _result_lock:
         history = list(_result_history)
 
@@ -473,12 +558,11 @@ def get_gps_height_utc_nearest(
         )
         return None
 
-    gps_data = _extract_gps_height_utc(best_result)
-    if gps_data is None:
+    if _extract_gps_height_utc(best_result) is None:
         return None
 
     logger.debug(f"匹配拍照时刻惯导数据: delta={delta_s:.3f}s")
-    return gps_data
+    return best_result.copy()
 
 
 def describe_gps_history(target_timestamp: Optional[float] = None) -> str:
